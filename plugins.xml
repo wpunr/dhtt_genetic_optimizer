@@ -1,0 +1,5 @@
+<library path="dhtt_genetic_optimizer">
+    <class type="dhtt_genetic_optimizer::FixedPotential" base_class_type="dhtt::PotentialType">
+        <description>Foo</description>
+    </class>
+</library>
