@@ -12,13 +12,14 @@ find_package(dhtt REQUIRED)
 find_package(dhtt_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 
-add_library(dhtt_genetic_plugins SHARED src/potentials/fixed_potential.cpp)
-target_include_directories(dhtt_genetic_plugins PUBLIC
+add_library(${PROJECT_NAME} SHARED src/dhtt_genetic_optimizer.cpp src/potentials/fixed_potential.cpp)
+target_include_directories(${PROJECT_NAME} PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>)
-target_link_libraries(dhtt_genetic_plugins dhtt::dhtt_lib)
-#ament_target_dependencies(dhtt_genetic_plugins dhtt dhtt_msgs pluginlib rclcpp)
+target_link_libraries(${PROJECT_NAME} dhtt::dhtt_lib ${pluginlib_TARGETS})
+#ament_target_dependencies(${PROJECT_NAME} dhtt dhtt_msgs pluginlib rclcpp)
 
+# first argument is the package with the base class
 pluginlib_export_plugin_description_file(dhtt plugins.xml)
 
 install(
@@ -27,7 +28,7 @@ install(
 )
 
 install(
-        TARGETS dhtt_genetic_plugins
+        TARGETS ${PROJECT_NAME}
         EXPORT export_${PROJECT_NAME}
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib
@@ -43,7 +44,7 @@ if (BUILD_TESTING)
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     )
-    target_link_libraries(${PROJECT_NAME}_test dhtt_genetic_plugins)
+    target_link_libraries(${PROJECT_NAME}_test ${PROJECT_NAME})
 endif ()
 
 # Python
