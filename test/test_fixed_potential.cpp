@@ -7,6 +7,7 @@
 #include "dhtt/server/main_server.hpp"
 #include "dhtt/tree/node.hpp"
 #include "dhtt/tree/potential_type.hpp"
+#include "dhtt_genetic_optimizer/dhtt_genetic_optimizer.hpp"
 
 #include "dhtt_genetic_optimizer/potentials/fixed_potential.hpp"
 
@@ -101,7 +102,7 @@ class TestMainServerF : public testing::Test
     std::shared_ptr<TestMainServer> test_main_server;
 
   protected:
-    void SetUp() override
+    virtual void SetUp() override
     {
         this->spinner =
             std::make_shared<rclcpp::executors::MultiThreadedExecutor>();
@@ -113,7 +114,7 @@ class TestMainServerF : public testing::Test
         this->spinner->add_node(this->test_main_server);
     }
 
-    void TearDown() override {}
+    virtual void TearDown() override {}
 };
 
 TEST_F(TestMainServerF, test_fixture)
@@ -140,27 +141,101 @@ TEST_F(TestMainServerF, test_make_node)
 
 /*** End Copied from dhtt_plugins/test/potential_test.cpp ***/
 
-TEST_F(TestMainServerF, test_FixedPotential)
+class TestFixedPotentialF : public TestMainServerF
 {
-    // Foo
-    auto node = std::make_shared<dhtt::Node>(
-        test_main_server->test_get_com_agg(), "Foo",
-        "dhtt_plugins::TestBehavior", std::vector<std::string>{}, "ROOT_0",
-        "dhtt_plugins::PtrBranchSocket", "",
-        "dhtt_plugins::EfficiencyPotential");
-    // Note that we are not having dhtt::Node load the code under test, so
-    // ignore EfficiencyPotential
+  public:
+    std::shared_ptr<dhtt::Node> node;
+    pluginlib::UniquePtr<dhtt::PotentialType> potential_plugin;
 
-    auto potential_plugin =
-        pluginlib::ClassLoader<dhtt::PotentialType>("dhtt",
-                                                    "dhtt::PotentialType")
-            .createUniqueInstance("dhtt_genetic_optimizer::FixedPotential");
+  protected:
+    void SetUp() override
+    {
+        TestMainServerF::SetUp();
 
-    ASSERT_TRUE(potential_plugin);
+        this->node = std::make_shared<dhtt::Node>(
+            test_main_server->test_get_com_agg(), "Bar",
+            "dhtt_plugins::TestBehavior", std::vector<std::string>{}, "ROOT_0",
+            "dhtt_plugins::PtrBranchSocket", "",
+            "dhtt_plugins::EfficiencyPotential");
+        // Note that we are not having dhtt::Node load the code under test, so
+        // ignore EfficiencyPotential
 
-    double res = potential_plugin->compute_activation_potential(node.get());
+        this->potential_plugin =
+            pluginlib::ClassLoader<dhtt::PotentialType>("dhtt",
+                                                        "dhtt::PotentialType")
+                .createUniqueInstance("dhtt_genetic_optimizer::FixedPotential");
+
+        ASSERT_TRUE(potential_plugin);
+    }
+};
+
+TEST_F(TestFixedPotentialF, test_FixedPotential)
+{
+    // No parameter set, check default return
+    double res{potential_plugin->compute_activation_potential(node.get())};
     std::cout << res << std::endl;
-    ASSERT_DOUBLE_EQ(res, 1.0);
+    ASSERT_DOUBLE_EQ(res, 0.0);
+}
+
+TEST_F(TestFixedPotentialF, test_FixedPotential_bad1)
+{
+    // Set parameters that don't apply to this node
+    node->get_com_agg()->set_parameter_sync(
+        rclcpp::Parameter(dhtt_genetic_optimizer::PARAM_NODE_NAMES,
+                          std::vector<std::string>{"Foo_1", "Foo_2"}));
+    node->get_com_agg()->set_parameter_sync(
+        rclcpp::Parameter(dhtt_genetic_optimizer::PARAM_NODE_VALUES,
+                          std::vector<double>{0.1, 0.5}));
+    auto res{potential_plugin->compute_activation_potential(node.get())};
+    std::cout << res << std::endl;
+    ASSERT_DOUBLE_EQ(res, 0.0);
+}
+
+TEST_F(TestFixedPotentialF, test_FixedPotential_bad2)
+{
+    // Set parameters but forget to do the other, should catch and return
+    // default
+    node->get_com_agg()->set_parameter_sync(rclcpp::Parameter(
+        dhtt_genetic_optimizer::PARAM_NODE_NAMES,
+        std::vector<std::string>{"Foo_1", "Foo_2", node->get_node_name()}));
+    node->get_com_agg()->set_parameter_sync(rclcpp::Parameter(
+        dhtt_genetic_optimizer::PARAM_NODE_VALUES,
+        std::vector<double>{0.1, 0.5})); // missing its value here
+    auto res{potential_plugin->compute_activation_potential(node.get())};
+    std::cout << res << std::endl;
+    ASSERT_DOUBLE_EQ(res, 0.0);
+}
+
+TEST_F(TestFixedPotentialF, test_FixedPotential_happy)
+{
+    // Set parameters correctly
+    // node->get_node_name() doesn't have the underscore suffix
+    node->get_com_agg()->set_parameter_sync(rclcpp::Parameter(
+        dhtt_genetic_optimizer::PARAM_NODE_NAMES,
+        std::vector<std::string>{"Foo_1", "Foo_2", node->get_node_name()}));
+    node->get_com_agg()->set_parameter_sync(
+        rclcpp::Parameter(dhtt_genetic_optimizer::PARAM_NODE_VALUES,
+                          std::vector<double>{0.1, 0.5, 0.9}));
+    auto res{potential_plugin->compute_activation_potential(node.get())};
+    std::cout << res << std::endl;
+    ASSERT_DOUBLE_EQ(res, 0.9);
+}
+
+TEST_F(TestFixedPotentialF, test_FixedPotential_happy_underscore)
+{
+    // Try it without the underscore suffix
+    ASSERT_EQ(node->get_node_name(), "Bar");
+    auto with_suffix = node->get_node_name() + "_1";
+    ASSERT_EQ(with_suffix, "Bar_1");
+    node->get_com_agg()->set_parameter_sync(rclcpp::Parameter(
+        dhtt_genetic_optimizer::PARAM_NODE_NAMES,
+        std::vector<std::string>{"Foo_1", "Foo_2", with_suffix}));
+    node->get_com_agg()->set_parameter_sync(
+        rclcpp::Parameter(dhtt_genetic_optimizer::PARAM_NODE_VALUES,
+                          std::vector<double>{0.1, 0.5, 0.9}));
+    auto res{potential_plugin->compute_activation_potential(node.get())};
+    std::cout << res << std::endl;
+    ASSERT_DOUBLE_EQ(res, 0.9);
 }
 
 int main(int argc, char **argv)
