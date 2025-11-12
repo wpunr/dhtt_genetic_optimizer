@@ -1,0 +1,34 @@
+NodeList:
+  - 'ParentAnd'
+  - 'FirstTask'
+  #  - 'ThirdTask' # test behavior is written poorly, so no more than two can run because resources aren't freed
+  - 'SecondTask'
+
+Nodes:
+  ParentAnd:
+    type: 1
+    behavior_type: 'dhtt_plugins::AndBehavior'
+    robot: 0
+    parent: 'NONE'
+    params: [ ]
+  SecondTask:
+    type: 4
+    behavior_type: 'dhtt_plugins::TestBehavior'
+    potential_type: 'dhtt_genetic_optimizer::FixedPotential'
+    robot: 0
+    parent: 'ParentAnd'
+    params: [ ]
+  FirstTask:
+    type: 4
+    behavior_type: 'dhtt_plugins::TestBehavior'
+    potential_type: 'dhtt_genetic_optimizer::FixedPotential'
+    robot: 0
+    parent: 'ParentAnd'
+    params: [ ]
+  ThirdTask:
+    type: 4
+    behavior_type: 'dhtt_plugins::TestBehavior'
+    potential_type: 'dhtt_genetic_optimizer::FixedPotential'
+    robot: 0
+    parent: 'ParentAnd'
+    params: [ ]

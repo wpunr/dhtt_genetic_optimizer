@@ -12,6 +12,7 @@ double FixedPotential::compute_activation_potential(dhtt::Node *container)
     std::vector<std::string> param_node_names;
     std::vector<double> param_node_values;
 
+    // Check if parameters are actually set
     if (container->get_com_agg()->has_parameter(
             dhtt_genetic_optimizer::PARAM_NODE_NAMES))
     {
@@ -28,7 +29,6 @@ double FixedPotential::compute_activation_potential(dhtt::Node *container)
         container->get_com_agg()->log_stream(dhtt::WARN, ss);
         return DEFAULT;
     }
-
     if (container->get_com_agg()->has_parameter(
             dhtt_genetic_optimizer::PARAM_NODE_VALUES))
     {
@@ -46,6 +46,8 @@ double FixedPotential::compute_activation_potential(dhtt::Node *container)
         return DEFAULT;
     }
 
+    // Helper lambdas. In situ, the node name should have an underscore number
+    // suffix
     auto find_index_with_suffix =
         [&param_node_names](const std::string &name_to_find)
     {
@@ -53,22 +55,14 @@ double FixedPotential::compute_activation_potential(dhtt::Node *container)
                           name_to_find)};
         return std::distance(param_node_names.cbegin(), it);
     };
-
     auto find_index_without_suffix =
-        [&param_node_names](const std::string &name_to_find)
+        [&find_index_with_suffix](const std::string &name_to_find)
     {
-        auto pred = [name_to_find](std::string with_underscores)
-        {
-            auto substr =
-                with_underscores.substr(0, with_underscores.find('_'));
-            return name_to_find == substr;
-        };
-
-        auto it{std::find_if(param_node_names.cbegin(), param_node_names.cend(),
-                             pred)};
-        return std::distance(param_node_names.cbegin(), it);
+        return find_index_with_suffix(
+            name_to_find.substr(0, name_to_find.find('_')));
     };
 
+    // Search
     auto index{find_index_with_suffix(container->get_node_name())};
     if (index ==
         std::distance(param_node_names.cbegin(), param_node_names.cend()))

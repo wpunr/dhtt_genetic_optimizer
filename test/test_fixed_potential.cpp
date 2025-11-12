@@ -153,7 +153,7 @@ class TestFixedPotentialF : public TestMainServerF
         TestMainServerF::SetUp();
 
         this->node = std::make_shared<dhtt::Node>(
-            test_main_server->test_get_com_agg(), "Bar",
+            test_main_server->test_get_com_agg(), "Bar_1",
             "dhtt_plugins::TestBehavior", std::vector<std::string>{}, "ROOT_0",
             "dhtt_plugins::PtrBranchSocket", "",
             "dhtt_plugins::EfficiencyPotential");
@@ -182,7 +182,7 @@ TEST_F(TestFixedPotentialF, test_FixedPotential_bad1)
     // Set parameters that don't apply to this node
     node->get_com_agg()->set_parameter_sync(
         rclcpp::Parameter(dhtt_genetic_optimizer::PARAM_NODE_NAMES,
-                          std::vector<std::string>{"Foo_1", "Foo_2"}));
+                          std::vector<std::string>{"Foo_2", "Foo_3"}));
     node->get_com_agg()->set_parameter_sync(
         rclcpp::Parameter(dhtt_genetic_optimizer::PARAM_NODE_VALUES,
                           std::vector<double>{0.1, 0.5}));
@@ -197,7 +197,7 @@ TEST_F(TestFixedPotentialF, test_FixedPotential_bad2)
     // default
     node->get_com_agg()->set_parameter_sync(rclcpp::Parameter(
         dhtt_genetic_optimizer::PARAM_NODE_NAMES,
-        std::vector<std::string>{"Foo_1", "Foo_2", node->get_node_name()}));
+        std::vector<std::string>{"Foo_2", "Foo_3", node->get_node_name()}));
     node->get_com_agg()->set_parameter_sync(rclcpp::Parameter(
         dhtt_genetic_optimizer::PARAM_NODE_VALUES,
         std::vector<double>{0.1, 0.5})); // missing its value here
@@ -209,10 +209,11 @@ TEST_F(TestFixedPotentialF, test_FixedPotential_bad2)
 TEST_F(TestFixedPotentialF, test_FixedPotential_happy)
 {
     // Set parameters correctly
-    // node->get_node_name() doesn't have the underscore suffix
+    // node->get_node_name() should have the underscore suffix
+    ASSERT_EQ(node->get_node_name(), "Bar_1");
     node->get_com_agg()->set_parameter_sync(rclcpp::Parameter(
         dhtt_genetic_optimizer::PARAM_NODE_NAMES,
-        std::vector<std::string>{"Foo_1", "Foo_2", node->get_node_name()}));
+        std::vector<std::string>{"Foo_2", "Foo_3", node->get_node_name()}));
     node->get_com_agg()->set_parameter_sync(
         rclcpp::Parameter(dhtt_genetic_optimizer::PARAM_NODE_VALUES,
                           std::vector<double>{0.1, 0.5, 0.9}));
@@ -224,12 +225,12 @@ TEST_F(TestFixedPotentialF, test_FixedPotential_happy)
 TEST_F(TestFixedPotentialF, test_FixedPotential_happy_underscore)
 {
     // Try it without the underscore suffix
-    ASSERT_EQ(node->get_node_name(), "Bar");
-    auto with_suffix = node->get_node_name() + "_1";
-    ASSERT_EQ(with_suffix, "Bar_1");
+    ASSERT_EQ(node->get_node_name(), "Bar_1");
+    auto without_suffix = node->get_node_name().substr(0, node->get_node_name().find('_'));
+    ASSERT_EQ(without_suffix, "Bar");
     node->get_com_agg()->set_parameter_sync(rclcpp::Parameter(
         dhtt_genetic_optimizer::PARAM_NODE_NAMES,
-        std::vector<std::string>{"Foo_1", "Foo_2", with_suffix}));
+        std::vector<std::string>{"Foo_2", "Foo_3", without_suffix}));
     node->get_com_agg()->set_parameter_sync(
         rclcpp::Parameter(dhtt_genetic_optimizer::PARAM_NODE_VALUES,
                           std::vector<double>{0.1, 0.5, 0.9}));
