@@ -1,0 +1,21 @@
+# Request
+bool reset_tree      # If true, STOP+RESET the tree before starting
+bool reset_level     # If true, call CookingRequest.START on /Cooking_Server before starting
+float64 timeout_sec  # How long to wait for DONE; <= 0 uses default
+
+string to_add        # absolute path to the .yaml tree description to load
+string[] file_args   # file args supplied to the above file
+
+---
+# Response
+bool success
+string message
+uint64 ticks_elapsed
+
+# CONSTANTS
+string FAILRESETDHTT = "RESET failed"
+string FAILRESETLEVEL = "reset_level (CookingRequest.START) failed"
+string FAILLOADYAML = "Load from yaml failed"
+string FAILSTART = "START failed"
+string FAILTIMEOUT = "Timed out waiting for DONE after"
+string FAILSUCCESS = "DONE"
