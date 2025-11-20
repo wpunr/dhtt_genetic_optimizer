@@ -105,7 +105,16 @@ def _expand(context, *args, **kwargs):
     start_index = _int_from_config(context, LaunchConfiguration("start_index"), 1)
     ns_prefix = _str_from_config(context, LaunchConfiguration("ns_prefix"), "ns")
 
-    actions = []
+    actions = [
+        Node(
+            package="dhtt_genetic_optimizer",
+            executable="dhtt_genetic_optimizer.py",
+            output="screen",
+            parameters=[{
+                'num_namespaces': num_instances,
+            }]
+        )
+    ]
     for i in range(start_index, start_index + num_instances):
         ns = f"{ns_prefix}{i}"
         actions.append(_make_group_for_namespace(ns))

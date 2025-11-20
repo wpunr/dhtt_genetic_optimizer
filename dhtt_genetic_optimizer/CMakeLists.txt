@@ -55,7 +55,7 @@ find_package(ament_cmake_python REQUIRED)
 ament_python_install_package(${PROJECT_NAME})
 
 # https://github.com/bponsler/ros2-support/blob/master/tutorials/creating-a-mixed-cpp-and-python-package.md
-install(PROGRAMS scripts/run_dhtt_genetic_optimizer.py dhtt_genetic_optimizer/eval.py DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS dhtt_genetic_optimizer/dhtt_genetic_optimizer.py dhtt_genetic_optimizer/eval.py DESTINATION lib/${PROJECT_NAME})
 
 if (BUILD_TESTING)
     find_package(ament_cmake_pytest REQUIRED)
