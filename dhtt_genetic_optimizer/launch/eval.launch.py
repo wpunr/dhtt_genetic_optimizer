@@ -81,6 +81,8 @@ def _make_group_for_namespace(ns: str):
             package="dhtt",
             executable="start_server",
             output="screen",
+            respawn=True,
+            respawn_delay=2,
         ),
 
         # Equivalent to: ros2 run dhtt_cooking dhtt_cooking
@@ -88,6 +90,8 @@ def _make_group_for_namespace(ns: str):
             package="dhtt_cooking",
             executable="dhtt_cooking",
             output="screen",
+            respawn=True,
+            respawn_delay=2,
         ),
 
         # Equivalent to: ros2 run dhtt_cooking eval
@@ -95,6 +99,8 @@ def _make_group_for_namespace(ns: str):
             package="dhtt_genetic_optimizer",
             executable="eval.py",
             output="screen",
+            respawn=True,
+            respawn_delay=2,
         ),
     ])
 
@@ -106,14 +112,14 @@ def _expand(context, *args, **kwargs):
     ns_prefix = _str_from_config(context, LaunchConfiguration("ns_prefix"), "ns")
 
     actions = [
-        Node(
-            package="dhtt_genetic_optimizer",
-            executable="dhtt_genetic_optimizer.py",
-            output="screen",
-            parameters=[{
-                'num_namespaces': num_instances,
-            }]
-        )
+        # Node(
+        #     package="dhtt_genetic_optimizer",
+        #     executable="dhtt_genetic_optimizer.py",
+        #     output="screen",
+        #     parameters=[{
+        #         'num_namespaces': num_instances,
+        #     }]
+        # )
     ]
     for i in range(start_index, start_index + num_instances):
         ns = f"{ns_prefix}{i}"

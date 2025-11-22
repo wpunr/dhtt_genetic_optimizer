@@ -1,3 +1,6 @@
+import os.path
+
+import dhtt_msgs.msg
 import pytest
 import rclpy
 import rclpy.node
@@ -161,14 +164,11 @@ class ServerNode(rclpy.node.Node):
 
 
 class TestGeneticOptimizer:
-    PARAM_NODE_NAMES = "FixedPotentialNodeNames"
-    PARAM_NODE_VALUES = "FixedPotentialValues"
+    PARAM_NODE_NAMES = dhtt_genetic_optimizer.dhtt_genetic_optimizer.PARAM_NODE_NAMES
+    PARAM_NODE_VALUES = dhtt_genetic_optimizer.dhtt_genetic_optimizer.PARAM_NODE_VALUES
 
     rclpy.init()
     node = ServerNode()
-
-    def test_true(self):
-        assert True
 
     def test_fixed_potential(self):
         def set_up(names: list[str], vals: list[float]):
@@ -206,7 +206,42 @@ class TestGeneticOptimizer:
             return history
 
         # TODO do this with more nodes after fixing TestBehavior
-        history = set_up(['FirstTask', 'SecondTask'], [0.9, 0.5]) # First then Second
-        assert 'FirstTask' in history[0] and 'SecondTask' in history[1] # number suffixes may change
-        history = set_up(['FirstTask', 'SecondTask'], [0.1, 0.9]) # Second then First
+        history = set_up(['FirstTask', 'SecondTask'], [0.9, 0.5])  # First then Second
+        assert 'FirstTask' in history[0] and 'SecondTask' in history[1]  # number suffixes may change
+        history = set_up(['FirstTask', 'SecondTask'], [0.1, 0.9])  # Second then First
         assert 'SecondTask' in history[0] and 'FirstTask' in history[1]
+
+
+class TestDeap:
+    def test_make_gene(self):
+        my_set = set[str]()
+        fixed_set = set[float]()
+        for _ in range(100):
+            gene = dhtt_genetic_optimizer.dhtt_genetic_optimizer.make_gene()
+            my_set.add(gene.plugin)
+            if ("FixedPotential" in gene.plugin):
+                fixed_set.add(gene.parameter)
+        print(my_set, fixed_set)
+        assert my_set == set(dhtt_genetic_optimizer.dhtt_genetic_optimizer.PLUGINS)
+        assert len(fixed_set) > 1
+
+    def test_make_individual(self):
+        individual = dhtt_genetic_optimizer.dhtt_genetic_optimizer.make_individual(
+            '/ros2_ws/src/dhtt_genetic_optimizer_base/dhtt_genetic_optimizer/test/test_descriptions/simple_and.yaml',
+            dhtt_msgs.msg.Node.BEHAVIOR)
+        assert os.path.exists(individual.yaml_path)
+        individual.genes[0].plugin = "fooasdf"
+        individual.generate_tree()
+        with open(individual.yaml_path, 'r') as f:
+            assert "fooasdf" in f.read()
+
+        for _ in range(100):
+            individual = dhtt_genetic_optimizer.dhtt_genetic_optimizer.make_individual(
+                '/ros2_ws/src/dhtt_genetic_optimizer_base/dhtt_genetic_optimizer/test/test_descriptions/simple_and.yaml',
+                dhtt_msgs.msg.Node.BEHAVIOR)
+
+            count = 0
+            for i in range(len(individual.genes)):
+                if individual.genes[i].parameter is not None:
+                    assert individual.param_names.value.string_array_value[count]
+                    assert individual.param_vals.value.double_array_value[count]

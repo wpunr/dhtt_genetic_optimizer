@@ -29,52 +29,120 @@ import math
 import random
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Tuple, Callable, Iterable
+from typing import List, Tuple, Callable, Iterable, Optional, Any
+from dataclasses import dataclass
+import yaml
+import os
+import uuid
 
 import rclpy
+import rcl_interfaces.srv
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 
-from dhtt_genetic_optimizer_msgs.srv import RunEval  # Provided by you
+import dhtt_msgs.msg
+from dhtt_genetic_optimizer_msgs.srv import RunEval
 
 from deap import base, creator, tools, algorithms
-
 
 # ---------------------------
 # Helper: gene representation
 # ---------------------------
 
-def make_gene() -> Tuple[str, float]:
-    """
-    TODO: Implement your domain-specific gene creation here.
-    Each gene must be a pair (str, float).
+PLUGINS = ['dhtt_plugins::EfficiencyPotential', 'dhtt_plugins::ResourcePotential',
+           'dhtt_genetic_optimizer::FixedPotential']
 
-    Examples (replace with your logic):
-      - return (random.choice(["a", "b", "c"]), random.uniform(0.0, 1.0))
-      - return (param_name, param_value)
-
-    For now, we provide a placeholder.
-    """
-    return (f"param_{random.randint(0, 9)}", random.uniform(0.0, 1.0))
+PARAM_NODE_NAMES = "FixedPotentialNodeNames"
+PARAM_NODE_VALUES = "FixedPotentialValues"
 
 
-def individual_to_file_args(individual: List[Tuple[str, float]]) -> List[str]:
-    """
-    Convert an individual (list of (key, value) pairs) into string arguments
-    for the ROS service request field `file_args`.
+@dataclass
+class Gene:
+    plugin: str  # in PLUGINS
+    parameter: Optional[float] = None
 
-    Customize this to match your evaluator's expectations.
-    Example format: ["key=value", ...]
-    """
-    args = []
-    for k, v in individual:
-        # Format float consistently; adjust precision if needed.
-        if isinstance(v, float) and (math.isinf(v) or math.isnan(v)):
-            fv = "nan"
-        else:
-            fv = f"{v:.6g}"
-        args.append(f"{k}={fv}")
-    return args
+
+class Individual:
+    def __init__(self, genes: list[Gene], original_tree_path: str, target_type: int):
+        self.genes = genes
+        self.original_tree_path = original_tree_path
+        self.target_type = target_type
+        self.yaml_path = ""
+        self.param_names = rclpy.parameter.Parameter(PARAM_NODE_NAMES, rclpy.Parameter.Type.STRING_ARRAY,
+                                                     []).to_parameter_msg()
+        self.param_vals = rclpy.parameter.Parameter(PARAM_NODE_VALUES, rclpy.Parameter.Type.DOUBLE_ARRAY,
+                                                    []).to_parameter_msg()
+        self.generate_tree()
+
+    # def __del__(self):
+    #     self._delete_yaml()
+
+    # define len, and [] so the deap uniformcx works correctly
+    def __len__(self):
+        return self.genes.__len__()
+
+    def __getitem__(self, item):
+        return self.genes.__getitem__(item)
+
+    def __setitem__(self, key, value):
+        return self.genes.__setitem__(key, value)
+
+    def _delete_yaml(self):
+        # Delete old file if exists
+        if self.yaml_path and os.path.exists(self.yaml_path):
+            os.remove(self.yaml_path)
+
+    def generate_tree(self) -> None:
+        self._delete_yaml()
+
+        # Load original YAML
+        with open(self.original_tree_path, 'r') as f:
+            tree = yaml.safe_load(f)
+
+        fixed_plugin_names = list[str]()
+        fixed_plugin_vals = list[float]()
+
+        # Substitute plugins for nodes matching target_type
+        gene_index = 0
+        for node_name in tree['NodeList']:
+            node = tree['Nodes'][node_name]
+            if node.get('type') == self.target_type and gene_index < len(self.genes):
+                node['potential_type'] = self.genes[gene_index].plugin
+                if self.genes[gene_index].plugin == 'dhtt_genetic_optimizer::FixedPotential':
+                    fixed_plugin_names.append(node_name)
+                    fixed_plugin_vals.append(self.genes[gene_index].parameter)
+                gene_index += 1
+        self.param_names = rclpy.parameter.Parameter(PARAM_NODE_NAMES, rclpy.Parameter.Type.STRING_ARRAY,
+                                                     fixed_plugin_names).to_parameter_msg()
+        self.param_vals = rclpy.parameter.Parameter(PARAM_NODE_VALUES, rclpy.Parameter.Type.DOUBLE_ARRAY,
+                                                    fixed_plugin_vals).to_parameter_msg()
+
+        # Write new YAML to /tmp with unique name
+        new_path = f"/tmp/{uuid.uuid4()}.yaml"
+        with open(new_path, 'w') as f:
+            yaml.dump(tree, f)
+
+        self.yaml_path = new_path
+        # print(f"Generated new tree at: {self.yaml_path}")
+
+
+def make_gene() -> Gene:
+    plugin = random.choice(PLUGINS)
+    param = random.uniform(0.0, 1.0) if plugin == 'dhtt_genetic_optimizer::FixedPotential' else None
+    return Gene(plugin, param)
+
+
+def make_individual(original_tree_path: str, target_type: int) -> Individual:
+    # Parse YAML to count nodes of target_type
+    with open(original_tree_path, 'r') as f:
+        tree = yaml.safe_load(f)
+
+    count = sum(1 for node_name in tree['NodeList'] if tree['Nodes'][node_name].get('type') == target_type)
+
+    # Generate required genes
+    genes = [make_gene() for _ in range(count)]
+
+    return Individual(genes, original_tree_path, target_type)
 
 
 # ---------------------------
@@ -93,23 +161,31 @@ class RosEvalPool:
         self._node = node
 
         # Parameters (declare defaults; override via ROS params)
-        self._num_namespaces = self._declare_get_int('num_namespaces', 1)  # e.g., 2 -> /ns1, /ns2
+        self._num_instances = self._declare_get_int('num_instances', 1)  # e.g., 2 -> /ns1, /ns2
         self._eval_service_name = self._declare_get_str('eval_service_name', 'eval/run')  # e.g., 'Eval_Server/run_eval'
+        self._param_client_service_name = self._declare_get_str('param_client_service_name', 'ComAgg/set_parameters')
         self._reset_tree = self._declare_get_bool('reset_tree', True)
         self._reset_level = self._declare_get_bool('reset_level', True)
-        self._default_timeout_sec = self._declare_get_float('default_timeout_sec', 0.0)
+        self._default_timeout_sec = self._declare_get_float('default_timeout_sec', 20)
         self._to_add = self._declare_get_str('to_add',
                                              '/IdeaProjects/CS776-dHTT/ros2_ws/src/dhtt_base/cooking_test/dhtt_cooking/test/experiment_descriptions/recipe_pasta_with_tomato_sauce.yaml')  # absolute path to YAML tree
+        self._file_args = self._declare_get_str_arr('file_args', [])
         self._service_wait_timeout = self._declare_get_float('service_wait_timeout_sec', 5.0)
 
         # Create clients for each namespace, e.g., /ns1/<service>, /ns2/<service>, ...
         self._clients: List[rclpy.client.Client] = []
-        for i in range(1, self._num_namespaces + 1):
+        self._param_clients: List[rclpy.client.Client] = []
+        for i in range(1, self._num_instances + 1):
             ns_prefix = f"/ns{i}"
             service_full = self._join_service(ns_prefix, self._eval_service_name)
             client = self._node.create_client(RunEval, service_full)
             self._clients.append(client)
             self._node.get_logger().info(f"[GA] Created client for service: {service_full}")
+
+            param_client_service_full = self._join_service(ns_prefix, self._param_client_service_name)
+            param_client = self._node.create_client(rcl_interfaces.srv.SetParameters, param_client_service_full)
+            self._param_clients.append(param_client)
+            self._node.get_logger().info(f"[GA] Created client for service: {param_client_service_full}")
 
         # Background spinner
         self._executor = MultiThreadedExecutor()
@@ -123,7 +199,7 @@ class RosEvalPool:
         self._rr_index = 0
 
         # Thread pool size equal to number of namespaces
-        self._pool = ThreadPoolExecutor(max_workers=self._num_namespaces)
+        self._pool = ThreadPoolExecutor(max_workers=self._num_instances)
 
     def _join_service(self, namespace: str, service_name: str) -> str:
         """Make sure we have a valid fully-qualified service path."""
@@ -147,6 +223,10 @@ class RosEvalPool:
         self._node.declare_parameter(name, default)
         return str(self._node.get_parameter(name).value)
 
+    def _declare_get_str_arr(self, name: str, default: list[str]) -> list[str]:
+        self._node.declare_parameter(name, default)
+        return list[str](self._node.get_parameter(name).value)
+
     def _spin_loop(self):
         """Continuously spin the executor to process service responses."""
         self._node.get_logger().info("[GA] Spinner thread started.")
@@ -156,19 +236,58 @@ class RosEvalPool:
             except Exception as e:
                 self._node.get_logger().error(f"[GA] Executor spin_once error: {e}")
 
-    def _next_client(self) -> rclpy.client.Client:
+    def _next_clients(self) -> tuple[rclpy.client.Client, rclpy.client.Client]:
         """Round-robin client selector."""
         with self._rr_lock:
-            client = self._clients[self._rr_index % len(self._clients)]
+            index = self._rr_index % len(self._clients)
+            client = self._clients[index]
+            param_client = self._param_clients[index]
             self._rr_index += 1
-        return client
+        return client, param_client
 
-    def evaluate(self, individual: List[Tuple[str, float]]) -> Tuple[float]:
+    def _tick_node(self, fut, end_time: int, tick_char='.', ticker_modulo: int = 100):
+        ticker = 0
+        while not fut.done():
+            if self._node.get_clock().now().nanoseconds >= end_time:
+                break
+            time.sleep(0.01)
+            if (ticker == 0):
+                print(tick_char, end='', flush=True)
+            ticker = (ticker + 1) % ticker_modulo
+        print('')
+
+    def _call_fixed_potential_service(self, param_client: rclpy.client.Client, individual: Individual):
+        # Ensure param client is available
+        if not param_client.service_is_ready():
+            ok = param_client.wait_for_service(timeout_sec=self._service_wait_timeout)
+            if not ok:
+                self._node.get_logger().warn("[GA] Param Service not available within timeout; penalizing fitness.")
+
+        req = rcl_interfaces.srv.SetParameters.Request()
+        req.parameters = [individual.param_names, individual.param_vals]
+        param_fut = param_client.call_async(req)
+
+        # Wait until completed; executor spinner thread will progress the future
+        self._tick_node(param_fut, end_time=self._node.get_clock().now().nanoseconds + int(1.0 * 1e9), tick_char='p',
+                        ticker_modulo=2)
+
+        try:
+            resp = param_fut.result()
+        except Exception as e:
+            self._node.get_logger().error(f"[GA] Param Service call exception: {e}")
+            return
+
+        if resp is None:
+            self._node.get_logger().warn("[GA] Param Service returned None")
+
+    def evaluate(self, individual: Individual) -> Tuple[float]:
         """
         Evaluate one individual by calling RunEval service on the next client (round-robin).
         Returns (objective,) — here we use ticks_elapsed as the objective to minimize.
         """
-        client = self._next_client()
+        client, param_client = self._next_clients()
+
+        self._call_fixed_potential_service(param_client, individual)
 
         # Ensure service is available
         if not client.service_is_ready():
@@ -182,14 +301,16 @@ class RosEvalPool:
         req.reset_tree = self._reset_tree
         req.reset_level = self._reset_level
         req.timeout_sec = self._default_timeout_sec
-        req.to_add = self._to_add
-        # req.file_args = individual_to_file_args(individual)
+        req.to_add = individual.yaml_path  # this is what the GA is changing
+        req.file_args = self._file_args
 
         # Call async and wait for result
         future = client.call_async(req)
+
         # Wait until completed; executor spinner thread will progress the future
-        while not future.done():
-            time.sleep(0.01)
+        # add 2% so the service has time to return timeout, otherwise we assume that is also blocked and need to taint it
+        self._tick_node(future, end_time=self._node.get_clock().now().nanoseconds + int(req.timeout_sec * 1e9 * 1.02),
+                        tick_char='e', ticker_modulo=10)
 
         try:
             resp = future.result()
@@ -233,22 +354,29 @@ class RosEvalPool:
         self._pool.shutdown(wait=True)
         # Executor/node shutdown handled by main
 
+    @property
+    def to_add(self):
+        return self._to_add
+
 
 # ---------------------------
 # Mutation operator: swap two positions
 # ---------------------------
 
-def mut_swap(individual: List[Tuple[str, float]]) -> Tuple[List[Tuple[str, float]],]:
+# type creator.Individual, not my Individual
+def mut_swap(individual) -> Tuple[Any,]:
     """
     Swap mutation: randomly choose two distinct indices and swap their genes.
     Returns a tuple (individual,) as per DEAP's mutation convention.
     """
-    size = len(individual)
+    size = len(individual.genes)
     if size < 2:
         return (individual,)
 
     i, j = random.sample(range(size), 2)
-    individual[i], individual[j] = individual[j], individual[i]
+    individual.genes[i], individual.genes[j] = individual.genes[j], individual.genes[i]
+    individual.generate_tree()
+
     return (individual,)
 
 
@@ -257,6 +385,9 @@ def mut_swap(individual: List[Tuple[str, float]]) -> Tuple[List[Tuple[str, float
 # ---------------------------
 
 def run_ga(node: Node):
+    # ROS eval pool & evaluation function
+    eval_pool = RosEvalPool(node)
+
     random.seed(node.get_parameter('random_seed').value if node.has_parameter('random_seed') else 42)
 
     # GA parameters (ROS params with sane defaults)
@@ -270,32 +401,32 @@ def run_ga(node: Node):
 
     POP_SIZE = int(node.get_parameter('population_size').value)
     NGEN = int(node.get_parameter('num_generations').value)
-    IND_SIZE = int(node.get_parameter('individual_size').value)
     CX_PB = float(node.get_parameter('cx_prob').value)
     MUT_PB = float(node.get_parameter('mut_prob').value)
     TOUR_K = int(node.get_parameter('tournament_size').value)
     UNIFORM_INDPB = float(node.get_parameter('uniform_indpb').value)
 
     # DEAP: define Fitness/Individual
-    if not hasattr(creator, "FitnessMin"):
-        creator.create("FitnessMin", base.Fitness, weights=(-1.0,))  # MINIMIZE
-    if not hasattr(creator, "Individual"):
-        creator.create("Individual", list, fitness=creator.FitnessMin)
+    creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+    creator.create("Individual", Individual, fitness=creator.FitnessMin)
+
+    def build_individual_factory(original_tree_path: str, target_type: int):
+        def _factory():
+            individual = make_individual(original_tree_path, target_type)
+            return creator.Individual(individual.genes, individual.original_tree_path, individual.target_type)
+
+        return _factory
 
     toolbox = base.Toolbox()
 
     # Attribute (gene) and individual/population initializers
-    toolbox.register("gene", make_gene)
-    toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.gene, n=IND_SIZE)
+    toolbox.register("individual", build_individual_factory(eval_pool.to_add, dhtt_msgs.msg.Node.BEHAVIOR))
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
     # Genetic operators
     toolbox.register("select", tools.selTournament, tournsize=TOUR_K)
     toolbox.register("mate", tools.cxUniform, indpb=UNIFORM_INDPB)
     toolbox.register("mutate", mut_swap)
-
-    # ROS eval pool & evaluation function
-    eval_pool = RosEvalPool(node)
 
     def _evaluate(ind):
         return eval_pool.evaluate(ind)
@@ -315,7 +446,7 @@ def run_ga(node: Node):
     population = toolbox.population(n=POP_SIZE)
 
     node.get_logger().info(
-        f"[GA] Starting optimization: pop={POP_SIZE}, ngen={NGEN}, ind_size={IND_SIZE}, "
+        f"[GA] Starting optimization: pop={POP_SIZE}, ngen={NGEN}, "
         f"cx_pb={CX_PB}, mut_pb={MUT_PB}, tourn={TOUR_K}, indpb={UNIFORM_INDPB}"
     )
 
@@ -339,7 +470,6 @@ def run_ga(node: Node):
     best = hof[0] if len(hof) > 0 else None
     if best is not None:
         node.get_logger().info(f"[GA] Best fitness: {best.fitness.values[0]:.6g}")
-        node.get_logger().info(f"[GA] Best individual (key=value args): {individual_to_file_args(best)}")
     else:
         node.get_logger().warn("[GA] No best individual found.")
 
@@ -352,13 +482,13 @@ def main():
 
     # Optional parameter for the YAML tree path and default timeout, etc.
     # You can set these with ROS parameters, e.g.:
-    #   ros2 run <your_pkg> ga_optimizer --ros-args -p to_add:=/abs/path/tree.yaml -p num_namespaces:=4 -p eval_service_name:=Eval_Server/run_eval
+    #   ros2 run <your_pkg> ga_optimizer --ros-args -p to_add:=/abs/path/tree.yaml -p num_instances:=4 -p eval_service_name:=Eval_Server/run_eval
     # node.declare_parameter('to_add',
     #                        '/IdeaProjects/CS776-dHTT/ros2_ws/src/dhtt_base/cooking_test/dhtt_cooking/test/experiment_descriptions/recipe_pasta_with_tomato_sauce.yaml')
     # node.declare_parameter('default_timeout_sec', 0.0)
     # node.declare_parameter('reset_tree', True)
     # node.declare_parameter('reset_level', True)
-    # node.declare_parameter('num_namespaces', 1)
+    # node.declare_parameter('num_instances', 1)
     # node.declare_parameter('eval_service_name', 'eval/run')
     # node.declare_parameter('service_wait_timeout_sec', 5.0)
     node.declare_parameter('random_seed', 42)
@@ -367,8 +497,6 @@ def main():
         _ = run_ga(node)
     except KeyboardInterrupt:
         node.get_logger().info("[GA] Interrupted by user.")
-    except Exception as e:
-        node.get_logger().error(f"[GA] Exception: {e}")
     finally:
         # Clean-up
         node.get_logger().info("[GA] Shutting down.")
