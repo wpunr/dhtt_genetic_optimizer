@@ -45,6 +45,17 @@ from dhtt_genetic_optimizer_msgs.srv import RunEval
 
 from deap import base, creator, tools, algorithms
 
+# Watchdog killer imports
+import signal
+import subprocess
+
+try:
+    import psutil
+
+    _HAVE_PSUTIL = True
+except Exception:
+    _HAVE_PSUTIL = False
+
 # ---------------------------
 # Helper: gene representation
 # ---------------------------
@@ -171,6 +182,7 @@ class RosEvalPool:
                                              '/IdeaProjects/CS776-dHTT/ros2_ws/src/dhtt_base/cooking_test/dhtt_cooking/test/experiment_descriptions/recipe_pasta_with_tomato_sauce.yaml')  # absolute path to YAML tree
         self._file_args = self._declare_get_str_arr('file_args', [])
         self._service_wait_timeout = self._declare_get_float('service_wait_timeout_sec', 5.0)
+        self._eval_max_retries = self._declare_get_int('eval_max_retries', 2)
 
         # Create clients for each namespace, e.g., /ns1/<service>, /ns2/<service>, ...
         self._clients: List[rclpy.client.Client] = []
@@ -200,6 +212,9 @@ class RosEvalPool:
 
         # Thread pool size equal to number of namespaces
         self._pool = ThreadPoolExecutor(max_workers=self._num_instances)
+
+        # per-namespace restart locks to avoid race conditions during restarts
+        self._ns_restart_locks: List[threading.Lock] = [threading.Lock() for _ in range(self._num_instances)]
 
     def _join_service(self, namespace: str, service_name: str) -> str:
         """Make sure we have a valid fully-qualified service path."""
@@ -236,14 +251,14 @@ class RosEvalPool:
             except Exception as e:
                 self._node.get_logger().error(f"[GA] Executor spin_once error: {e}")
 
-    def _next_clients(self) -> tuple[rclpy.client.Client, rclpy.client.Client]:
-        """Round-robin client selector."""
+    def _next_clients(self) -> tuple[rclpy.client.Client, rclpy.client.Client, int]:
+        """Round-robin client selector, also returns index (0-based)."""
         with self._rr_lock:
             index = self._rr_index % len(self._clients)
             client = self._clients[index]
             param_client = self._param_clients[index]
             self._rr_index += 1
-        return client, param_client
+            return client, param_client, index
 
     def _tick_node(self, fut, end_time: int, tick_char='.', ticker_modulo: int = 100):
         ticker = 0
@@ -280,58 +295,129 @@ class RosEvalPool:
         if resp is None:
             self._node.get_logger().warn("[GA] Param Service returned None")
 
-    def evaluate(self, individual: Individual) -> Tuple[float]:
-        """
-        Evaluate one individual by calling RunEval service on the next client (round-robin).
-        Returns (objective,) — here we use ticks_elapsed as the objective to minimize.
-        """
-        client, param_client = self._next_clients()
+    def _restart_namespace(self, ns_index_0_based: int, grace_sec: float = 0.8) -> None:
+        ns_num = ns_index_0_based + 1
+        ns_token = f"__ns:=/ns{ns_num}"
+        killed_pids = []
 
-        self._call_fixed_potential_service(param_client, individual)
+        if _HAVE_PSUTIL:
+            for p in psutil.process_iter(["pid", "cmdline"]):
+                try:
+                    cmd = " ".join(p.info.get("cmdline") or [])
+                    if ns_token in cmd:
+                        p.send_signal(signal.SIGTERM)
+                        killed_pids.append(p.pid)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            time.sleep(grace_sec)
+            for pid in killed_pids:
+                try:
+                    psutil.Process(pid).kill()
+                except Exception:
+                    pass
+        else:
+            subprocess.run(["pkill", "-TERM", "-f", ns_token], check=False)
+            time.sleep(grace_sec)
+            subprocess.run(["pkill", "-KILL", "-f", ns_token], check=False)
 
-        # Ensure service is available
-        if not client.service_is_ready():
-            ok = client.wait_for_service(timeout_sec=self._service_wait_timeout)
-            if not ok:
-                self._node.get_logger().warn("[GA] Service not available within timeout; penalizing fitness.")
-                return (float('inf'),)
+        self._node.get_logger().warn(f"[GA] Restarted namespace /ns{ns_num}; waiting for services…")
 
-        # Build request
-        req = RunEval.Request()
-        req.reset_tree = self._reset_tree
-        req.reset_level = self._reset_level
-        req.timeout_sec = self._default_timeout_sec
-        req.to_add = individual.yaml_path  # this is what the GA is changing
-        req.file_args = self._file_args
+        eval_client = self._clients[ns_index_0_based]
+        param_client = self._param_clients[ns_index_0_based]
+        deadline = time.time() + (self._service_wait_timeout * 4.0)
 
-        # Call async and wait for result
+        while time.time() < deadline:
+            ok_eval = eval_client.wait_for_service(timeout_sec=0.5)
+            ok_param = param_client.wait_for_service(timeout_sec=0.5)
+            if ok_eval and ok_param:
+                break
+            time.sleep(0.1)
+
+    def _eval_once(self, client: rclpy.client.Client, req: RunEval.Request) -> Tuple[float, bool, bool]:
+        """:return (objective, did_timeout, failtimeout_flag)"""
         future = client.call_async(req)
+        end_time = self._node.get_clock().now().nanoseconds + int(req.timeout_sec * 1e9 * 1.02)
+        self._tick_node(future, end_time=end_time, tick_char='e', ticker_modulo=10)
 
-        # Wait until completed; executor spinner thread will progress the future
-        # add 2% so the service has time to return timeout, otherwise we assume that is also blocked and need to taint it
-        self._tick_node(future, end_time=self._node.get_clock().now().nanoseconds + int(req.timeout_sec * 1e9 * 1.02),
-                        tick_char='e', ticker_modulo=10)
+        if not future.done():
+            return (float('inf'), True, False)
 
         try:
             resp = future.result()
         except Exception as e:
             self._node.get_logger().error(f"[GA] Service call exception: {e}")
-            return (float('inf'),)
+            return (float('inf'), False, False)
 
         if resp is None:
             self._node.get_logger().warn("[GA] Service returned None; penalizing fitness.")
-            return (float('inf'),)
+            return (float('inf'), False, False)
 
-        # Use ticks_elapsed as the objective to minimize
+        failtimeout = (
+                not getattr(resp, "success", True)
+                and getattr(resp, "message", "") == RunEval.Response.FAILTIMEOUT
+        )
+        if failtimeout:
+            self._node.get_logger().warn("[GA] Server reported FAILTIMEOUT.")
+            return (float('inf'), False, True)
+
         objective = float(resp.ticks_elapsed)
+        return (objective, False, False)
 
-        # Optional: if success is False, you might want to penalize further
-        if not getattr(resp, "success", True):
-            self._node.get_logger().warn(f"[GA] Eval unsuccessful: {getattr(resp, 'message', '')}")
-            # You can choose to add a penalty; for now, use objective as-is
-            # Or: objective = float('inf')
+    def evaluate(self, individual: Individual) -> Tuple[float]:
+        """
+        Evaluate one Individual by calling RunEval asynchronously on the next namespace client.
+        If the async call times out/hangs or returns FAILTIMEOUT, perform:
+          eval -> (kill namespace, wait, reapply params) -> retry
+        for a configurable number of retries (ROS param: eval_max_retries).
+        """
+        client, param_client, ns_index = self._next_clients()
+        ns_str = f"/ns{ns_index + 1}"
 
-        return (objective,) # TODO why is this sometimes 0
+        # Build request once
+        req = RunEval.Request()
+        req.reset_tree = self._reset_tree
+        req.reset_level = self._reset_level
+        req.timeout_sec = self._default_timeout_sec
+        req.to_add = individual.yaml_path
+        req.file_args = self._file_args
+
+        total_attempts = self._eval_max_retries + 1  # initial attempt + retry count
+
+        for attempt in range(total_attempts):
+            # Apply FixedPotential parameters before all attempts
+            self._call_fixed_potential_service(param_client, individual)
+
+            # For attempt 0, no restart; for subsequent attempts, restart first
+            if attempt != 0:
+                # Serialize restarts per namespace to avoid races
+                with self._ns_restart_locks[ns_index]:
+                    self._node.get_logger().warn(f"[GA] Restarting {ns_str} before retry {attempt}/{total_attempts}…")
+                    self._restart_namespace(ns_index)
+                    self._call_fixed_potential_service(param_client, individual)
+
+            # Ensure service is available
+            if not client.service_is_ready():
+                ok = client.wait_for_service(timeout_sec=self._service_wait_timeout)
+                if not ok:
+                    self._node.get_logger().warn(
+                        f"[GA] {ns_str} service not available; attempt {attempt + 1}/{total_attempts} penalized.")
+                    continue  # proceed to next attempt (or exit if out of retries)
+
+            # Perform the evaluation attempt
+            objective, did_timeout, failtimeout_flag = self._eval_once(client, req)
+            if not did_timeout and not failtimeout_flag:
+                # Success
+                return (objective,)
+
+            # Log and continue
+            reason = "async timeout/hang" if did_timeout else "server reported FAILTIMEOUT"
+            self._node.get_logger().warn(
+                f"[GA] Eval in {ns_str} failed ({reason}); attempt {attempt + 1}/{total_attempts}."
+            )
+
+        # All attempts failed
+        self._node.get_logger().warn(f"[GA] All {total_attempts} attempts in {ns_str} failed; penalizing fitness.")
+        return (float('inf'),)
 
     def parallel_map(self, func: Callable, iterable: Iterable):
         """
