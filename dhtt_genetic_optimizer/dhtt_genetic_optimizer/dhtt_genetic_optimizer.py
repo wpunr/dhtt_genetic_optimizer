@@ -93,7 +93,7 @@ class Individual:
             os.remove(self.yaml_path)
 
     def generate_tree(self) -> None:
-        self._delete_yaml()
+        self._delete_yaml() # TODO just make the uuid file once
 
         # Load original YAML
         with open(self.original_tree_path, 'r') as f:
@@ -331,7 +331,7 @@ class RosEvalPool:
             # You can choose to add a penalty; for now, use objective as-is
             # Or: objective = float('inf')
 
-        return (objective,)
+        return (objective,) # TODO why is this sometimes 0
 
     def parallel_map(self, func: Callable, iterable: Iterable):
         """
