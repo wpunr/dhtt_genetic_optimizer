@@ -34,6 +34,7 @@ from dataclasses import dataclass
 import yaml
 import os
 import uuid
+import datetime
 
 import rclpy
 import rcl_interfaces.srv
@@ -216,6 +217,8 @@ class RosEvalPool:
         # per-namespace restart locks to avoid race conditions during restarts
         self._ns_restart_locks: List[threading.Lock] = [threading.Lock() for _ in range(self._num_instances)]
 
+        self.slowest_successful_wall_time: datetime.timedelta | None = None
+
     def _join_service(self, namespace: str, service_name: str) -> str:
         """Make sure we have a valid fully-qualified service path."""
         ns = namespace.rstrip('/')
@@ -335,6 +338,7 @@ class RosEvalPool:
 
     def _eval_once(self, client: rclpy.client.Client, req: RunEval.Request) -> Tuple[float, bool, bool]:
         """:return (objective, did_timeout, failtimeout_flag)"""
+        start_wall_time = datetime.datetime.now()
         future = client.call_async(req)
         end_time = self._node.get_clock().now().nanoseconds + int(req.timeout_sec * 1e9 * 1.02)
         self._tick_node(future, end_time=end_time, tick_char='e', ticker_modulo=10)
@@ -360,6 +364,10 @@ class RosEvalPool:
             self._node.get_logger().warn("[GA] Server reported FAILTIMEOUT.")
             return (float('inf'), False, True)
 
+        wall_duration = datetime.datetime.now() - start_wall_time
+        if self.slowest_successful_wall_time is None or wall_duration > self.slowest_successful_wall_time:
+            self.slowest_successful_wall_time = wall_duration
+
         objective = float(resp.ticks_elapsed)
         return (objective, False, False)
 
@@ -377,7 +385,8 @@ class RosEvalPool:
         req = RunEval.Request()
         req.reset_tree = self._reset_tree
         req.reset_level = self._reset_level
-        req.timeout_sec = self._default_timeout_sec
+        # timeout 10% higher than slowest seen so far
+        req.timeout_sec = self._default_timeout_sec if self.slowest_successful_wall_time is None else self.slowest_successful_wall_time.total_seconds() * 1.1
         req.to_add = individual.yaml_path
         req.file_args = self._file_args
 
