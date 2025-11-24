@@ -92,6 +92,7 @@ def _make_group_for_namespace(ns: str):
             output="screen",
             respawn=True,
             respawn_delay=2,
+            parameters=[{'render': False, 'level_name': 'dhtt_experiment_static'}]
         ),
 
         # Equivalent to: ros2 run dhtt_cooking eval

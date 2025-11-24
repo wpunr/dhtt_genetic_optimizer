@@ -35,6 +35,7 @@ import yaml
 import os
 import uuid
 import datetime
+import copy
 
 import rclpy
 import rcl_interfaces.srv
@@ -98,6 +99,194 @@ class Individual:
     def __setitem__(self, key, value):
         return self.genes.__setitem__(key, value)
 
+    # Helpers to unroll nested yaml files
+
+    @staticmethod
+    def _parse_params(params_list):
+        """
+        Convert the 'params' list (e.g., ['mark: A#', 'object: Plate']) into a dict.
+        Supports either strings 'key: value' or direct YAML mappings.
+        """
+        result = {}
+        if not params_list:
+            return result
+        for item in params_list:
+            if isinstance(item, str):
+                # Split only on the first colon
+                key, sep, val = item.partition(':')
+                if sep:
+                    result[key.strip()] = val.strip()
+                else:
+                    # If no colon, treat entire string as a key with empty value.
+                    result[item.strip()] = ''
+            elif isinstance(item, dict):
+                for k, v in item.items():
+                    result[str(k)] = str(v)
+            else:
+                # Unsupported item type—ignore gracefully
+                pass
+        return result
+
+    @staticmethod
+    def _subst_str(s, subs):
+        """
+        Replace all occurrences of $key with subs[key] in a string.
+        """
+        if not isinstance(s, str) or not subs:
+            return s
+        for k, v in subs.items():
+            s = s.replace(f'${k}', v)
+        return s
+
+    @staticmethod
+    def _deep_substitute(obj, subs):
+        """
+        Recursively apply variable substitution to strings across a Python structure.
+        """
+        if isinstance(obj, str):
+            return Individual._subst_str(obj, subs)
+        elif isinstance(obj, list):
+            return [Individual._deep_substitute(x, subs) for x in obj]
+        elif isinstance(obj, dict):
+            return {k: Individual._deep_substitute(v, subs) for k, v in obj.items()}
+        else:
+            return obj
+
+    @staticmethod
+    def _namespace_nodes(sub_nodes, prefix):
+        """
+        Namespace all node names under 'prefix' to avoid collisions.
+        Returns:
+          new_nodes: dict with namespaced keys
+          name_map:  dict { old_name: namespaced_name }
+        Also updates 'parent' references that point to nodes inside the subtree.
+        """
+        name_map = {old: f"{prefix}::{old}" for old in sub_nodes.keys()}
+        new_nodes = {}
+        for old_name, node in sub_nodes.items():
+            node_copy = copy.deepcopy(node)
+            parent = node_copy.get('parent')
+            if isinstance(parent, str) and parent in name_map:
+                node_copy['parent'] = name_map[parent]
+            new_nodes[name_map[old_name]] = node_copy
+        return new_nodes, name_map
+
+    @staticmethod
+    def _load_yaml_file(path):
+        with open(path, 'r') as f:
+            return yaml.safe_load(f)
+
+    @staticmethod
+    def _expand_once(data, current_dir):
+        """
+        Expand exactly one SUBTREE (type=5) occurrence in 'data' (if present).
+        Returns a tuple (expanded_data, changed, next_dir), where:
+          - expanded_data: updated YAML dict
+          - changed: True if an expansion happened, else False
+          - next_dir: the directory to use for subsequent nested expansions
+        We expand based on the first SUBTREE occurrence found in NodeList order.
+        """
+        node_list = data.get('NodeList', [])
+        nodes = data.get('Nodes', {})
+
+        for idx, node_name in enumerate(node_list):
+            node_def = nodes.get(node_name)
+            if not node_def:
+                continue
+
+            if int(node_def.get('type', -1)) != dhtt_msgs.msg.Node.SUBTREE:
+                continue  # Not a subtree node, skip
+
+            include_rel = node_def.get('behavior_type')
+            if not include_rel or not isinstance(include_rel, str):
+                raise ValueError(f"SUBTREE node '{node_name}' has invalid behavior_type: {include_rel}")
+
+            include_path = os.path.join(current_dir, include_rel)
+            if not os.path.exists(include_path):
+                raise FileNotFoundError(f"Included YAML not found: {include_path}")
+
+            # Load included subtree YAML
+            sub_data = Individual._load_yaml_file(include_path)
+            if not isinstance(sub_data, dict):
+                raise ValueError(f"Included YAML at {include_path} is not a mapping/dict.")
+
+            sub_node_list = sub_data.get('NodeList', [])
+            sub_nodes = copy.deepcopy(sub_data.get('Nodes', {}))
+
+            # Parse variables from 'params' and substitute them through the subtree
+            subs = Individual._parse_params(node_def.get('params', []))
+            sub_nodes = Individual._deep_substitute(sub_nodes, subs)
+            sub_node_list = Individual._deep_substitute(sub_node_list, subs)
+
+            # Attach subtree root(s) to the including node's parent
+            include_parent = node_def.get('parent')
+            for n, nd in sub_nodes.items():
+                # The highest node in the lower YAML has parent 'NONE' -> becomes including node's parent
+                if str(nd.get('parent', '')).strip() == 'NONE':
+                    nd['parent'] = include_parent
+
+            # Namespace the subtree nodes under the including node's name
+            namespaced_nodes, name_map = Individual._namespace_nodes(sub_nodes, node_name)
+            namespaced_node_list = [name_map.get(n, n) for n in sub_node_list]
+
+            # Splice into main: replace the subtree placeholder slot with the expanded nodes
+            new_node_list = node_list[:idx] + namespaced_node_list + node_list[idx + 1:]
+            new_nodes = copy.deepcopy(nodes)
+            # Remove the placeholder node
+            if node_name in new_nodes:
+                del new_nodes[node_name]
+            # Add the expanded namespaced nodes
+            for k, v in namespaced_nodes.items():
+                new_nodes[k] = v
+
+            new_data = {
+                'NodeList': new_node_list,
+                'Nodes': new_nodes
+            }
+
+            # Next dir is the dir of the included YAML (for nested includes)
+            next_dir = os.path.dirname(include_path)
+
+            return new_data, True, next_dir
+
+        # No subtree nodes found
+        return data, False, current_dir
+
+    @staticmethod
+    def expand_all_subtrees(data, base_dir):
+        """
+        Recursively expand all SUBTREE nodes in the YAML 'data'.
+        base_dir: directory of the main YAML, used to resolve includes.
+        Returns a new dict with all subtrees unrolled.
+        """
+        current_dir = base_dir
+        while True:
+            data, changed, current_dir = Individual._expand_once(data, current_dir)
+            if not changed:
+                break
+            # After each expansion we loop again, allowing nested expansions to resolve.
+        return data
+
+    @staticmethod
+    def unroll_subtrees_file(main_yaml_path):
+        """
+        Load the main YAML file, recursively unroll all subtrees, and
+        return the final combined YAML as a Python dict.
+        """
+        base_dir = os.path.dirname(os.path.abspath(main_yaml_path))
+        data = Individual._load_yaml_file(main_yaml_path)
+        if not isinstance(data, dict) or 'NodeList' not in data or 'Nodes' not in data:
+            raise ValueError("Main YAML must contain 'NodeList' and 'Nodes' keys.")
+        return Individual.expand_all_subtrees(data, base_dir)
+
+    @staticmethod
+    def dump_yaml(data, path):
+        """
+        Dump the Python dict back to YAML, preserving insertion order.
+        """
+        with open(path, 'w') as f:
+            yaml.safe_dump(data, f, sort_keys=False)
+
     def delete_yaml(self):
         # Delete old file if exists
         if self.yaml_path and os.path.exists(self.yaml_path):
@@ -105,11 +294,9 @@ class Individual:
 
     def generate_tree(self) -> None:
         """Expected to be called at eval time, that is, after recombination"""
-        # TODO need to unroll tyler's nested yaml files
 
-        # Load original YAML
-        with open(self.original_tree_path, 'r') as f:
-            tree = yaml.safe_load(f)
+        # Unroll original YAML
+        tree = Individual.unroll_subtrees_file(self.original_tree_path)
 
         fixed_plugin_names = list[str]()
         fixed_plugin_vals = list[float]()
