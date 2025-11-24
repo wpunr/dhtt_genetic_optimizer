@@ -90,8 +90,14 @@ double FixedPotential::compute_activation_potential(dhtt::Node *container)
 
     std::stringstream ss;
     ss << "Returning 0.0 activation, node name not found:"
-       << container->get_node_name() << std::endl;
-    container->get_com_agg()->log_stream(dhtt::WARN, ss);
+       << container->get_node_name() << " in names: ";
+    for (auto name : param_node_names)
+    {
+        ss << name << ' ';
+    }
+    ss << std::endl;
+
+    container->get_com_agg()->log_stream(dhtt::ERROR, ss);
     return DEFAULT;
 }
 } // namespace dhtt_genetic_optimizer

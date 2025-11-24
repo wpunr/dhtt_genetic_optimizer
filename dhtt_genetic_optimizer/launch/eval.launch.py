@@ -20,7 +20,7 @@ from launch_ros.actions import Node, PushRosNamespace, SetRemap
 # your choice to do /rosout or /parameter_events
 REMAPPINGS = {
     # ("/rosout", "rosout"),
-    # ("/parameter_events", "parameter_events"),
+    ("/parameter_events", "parameter_events"),
     ("/ComAgg/describe_parameters", "ComAgg/describe_parameters"),
     ("/ComAgg/get_parameter_types", "ComAgg/get_parameter_types"),
     ("/ComAgg/get_parameters", "ComAgg/get_parameters"),

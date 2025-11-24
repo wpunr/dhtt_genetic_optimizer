@@ -84,7 +84,6 @@ class Individual:
                                                      []).to_parameter_msg()
         self.param_vals = rclpy.parameter.Parameter(PARAM_NODE_VALUES, rclpy.Parameter.Type.DOUBLE_ARRAY,
                                                     []).to_parameter_msg()
-        self.generate_tree()
 
     # def __del__(self):
     #     self._delete_yaml()
@@ -99,13 +98,14 @@ class Individual:
     def __setitem__(self, key, value):
         return self.genes.__setitem__(key, value)
 
-    def _delete_yaml(self):
+    def delete_yaml(self):
         # Delete old file if exists
         if self.yaml_path and os.path.exists(self.yaml_path):
             os.remove(self.yaml_path)
 
     def generate_tree(self) -> None:
-        self._delete_yaml() # TODO just make the uuid file once
+        """Expected to be called at eval time, that is, after recombination"""
+        # TODO need to unroll tyler's nested yaml files
 
         # Load original YAML
         with open(self.original_tree_path, 'r') as f:
@@ -130,17 +130,17 @@ class Individual:
                                                     fixed_plugin_vals).to_parameter_msg()
 
         # Write new YAML to /tmp with unique name
-        new_path = f"/tmp/{uuid.uuid4()}.yaml"
-        with open(new_path, 'w') as f:
+        self.yaml_path = f"/tmp/{uuid.uuid4()}.yaml"
+        with open(self.yaml_path, 'w') as f:
             yaml.dump(tree, f)
 
-        self.yaml_path = new_path
         # print(f"Generated new tree at: {self.yaml_path}")
 
 
 def make_gene() -> Gene:
     plugin = random.choice(PLUGINS)
-    param = random.uniform(0.0, 1.0) if plugin == 'dhtt_genetic_optimizer::FixedPotential' else None
+    # activation potential should be (0, 1.0], this is close enough
+    param = random.uniform(0.1, 1.0) if plugin == 'dhtt_genetic_optimizer::FixedPotential' else None
     return Gene(plugin, param)
 
 
@@ -176,6 +176,8 @@ class RosEvalPool:
         self._num_instances = self._declare_get_int('num_instances', 1)  # e.g., 2 -> /ns1, /ns2
         self._eval_service_name = self._declare_get_str('eval_service_name', 'eval/run')  # e.g., 'Eval_Server/run_eval'
         self._param_client_service_name = self._declare_get_str('param_client_service_name', 'ComAgg/set_parameters')
+        self._get_param_client_service_name = self._declare_get_str('get_param_client_service_name',
+                                                                    'ComAgg/get_parameters')
         self._reset_tree = self._declare_get_bool('reset_tree', True)
         self._reset_level = self._declare_get_bool('reset_level', True)
         self._default_timeout_sec = self._declare_get_float('default_timeout_sec', 20)
@@ -188,6 +190,7 @@ class RosEvalPool:
         # Create clients for each namespace, e.g., /ns1/<service>, /ns2/<service>, ...
         self._clients: List[rclpy.client.Client] = []
         self._param_clients: List[rclpy.client.Client] = []
+        self._get_param_clients: List[rclpy.client.Client] = []
         for i in range(1, self._num_instances + 1):
             ns_prefix = f"/ns{i}"
             service_full = self._join_service(ns_prefix, self._eval_service_name)
@@ -199,6 +202,11 @@ class RosEvalPool:
             param_client = self._node.create_client(rcl_interfaces.srv.SetParameters, param_client_service_full)
             self._param_clients.append(param_client)
             self._node.get_logger().info(f"[GA] Created client for service: {param_client_service_full}")
+
+            get_param_client_service_full = self._join_service(ns_prefix, self._get_param_client_service_name)
+            get_param_client = self._node.create_client(rcl_interfaces.srv.GetParameters, get_param_client_service_full)
+            self._get_param_clients.append(get_param_client)
+            self._node.get_logger().info(f"[GA] Created client for service: {get_param_client_service_full}")
 
         # Background spinner
         self._executor = MultiThreadedExecutor()
@@ -216,6 +224,7 @@ class RosEvalPool:
 
         # per-namespace restart locks to avoid race conditions during restarts
         self._ns_restart_locks: List[threading.Lock] = [threading.Lock() for _ in range(self._num_instances)]
+        self._ns_locks: List[threading.Lock] = [threading.Lock() for _ in range(self._num_instances)]
 
         self.slowest_successful_wall_time: datetime.timedelta | None = None
 
@@ -254,14 +263,15 @@ class RosEvalPool:
             except Exception as e:
                 self._node.get_logger().error(f"[GA] Executor spin_once error: {e}")
 
-    def _next_clients(self) -> tuple[rclpy.client.Client, rclpy.client.Client, int]:
+    def _next_clients(self) -> tuple[rclpy.client.Client, rclpy.client.Client, rclpy.client.Client, int]:
         """Round-robin client selector, also returns index (0-based)."""
         with self._rr_lock:
             index = self._rr_index % len(self._clients)
             client = self._clients[index]
             param_client = self._param_clients[index]
+            get_param_client = self._get_param_clients[index]
             self._rr_index += 1
-            return client, param_client, index
+            return client, param_client, get_param_client, index
 
     def _tick_node(self, fut, end_time: int, tick_char='.', ticker_modulo: int = 100):
         ticker = 0
@@ -270,22 +280,30 @@ class RosEvalPool:
                 break
             time.sleep(0.01)
             if (ticker == 0):
-                print(tick_char, end='', flush=True)
+                pass  # print(tick_char, end='', flush=True)
             ticker = (ticker + 1) % ticker_modulo
-        print('')
+        # print('')
 
-    def _call_fixed_potential_service(self, param_client: rclpy.client.Client, individual: Individual):
+    def _call_fixed_potential_service(self, param_client: rclpy.client.Client, get_param_client: rclpy.client.Client,
+                                      individual: Individual) -> bool:
         # Ensure param client is available
         if not param_client.service_is_ready():
             ok = param_client.wait_for_service(timeout_sec=self._service_wait_timeout)
             if not ok:
                 self._node.get_logger().warn("[GA] Param Service not available within timeout; penalizing fitness.")
+        if not get_param_client.service_is_ready():
+            ok = get_param_client.wait_for_service(timeout_sec=self._service_wait_timeout)
+            if not ok:
+                self._node.get_logger().warn("[GA] Get Param Service not available within timeout; penalizing fitness.")
 
+        # Send set parameters request
         req = rcl_interfaces.srv.SetParameters.Request()
         req.parameters = [individual.param_names, individual.param_vals]
         param_fut = param_client.call_async(req)
 
         # Wait until completed; executor spinner thread will progress the future
+        # self._node.get_logger().fatal(
+        #     f"[GA] sending parameters {individual.param_names.value.string_array_value} and {individual.param_vals.value.double_array_value}")
         self._tick_node(param_fut, end_time=self._node.get_clock().now().nanoseconds + int(1.0 * 1e9), tick_char='p',
                         ticker_modulo=2)
 
@@ -293,10 +311,42 @@ class RosEvalPool:
             resp = param_fut.result()
         except Exception as e:
             self._node.get_logger().error(f"[GA] Param Service call exception: {e}")
-            return
+            return False
 
         if resp is None:
-            self._node.get_logger().warn("[GA] Param Service returned None")
+            self._node.get_logger().error("[GA] Param Service returned None")
+            return False
+
+        # Check that parameters were received correctly
+        get_req = rcl_interfaces.srv.GetParameters.Request()
+        get_req.names = [PARAM_NODE_NAMES, PARAM_NODE_VALUES]
+        get_param_fut = get_param_client.call_async(get_req)
+        # self._node.get_logger().fatal(
+        #     f"[GA] getting parameters {get_req.names}")
+        self._tick_node(get_param_fut, end_time=self._node.get_clock().now().nanoseconds + int(1.0 * 1e9),
+                        tick_char='g',
+                        ticker_modulo=2)
+
+        try:
+            get_resp = get_param_fut.result()
+        except Exception as e:
+            self._node.get_logger().error(f"[GA] Get Param Service call exception: {e}")
+            return False
+
+        if get_resp is None:
+            self._node.get_logger().error("[GA] Get Param Service returned None")
+            return False
+
+        get_param_names_result = get_param_fut.result().values[0].string_array_value
+        get_param_vals_result = get_param_fut.result().values[1].double_array_value
+
+        if get_param_names_result != req.parameters[0].value.string_array_value or get_param_vals_result != \
+                req.parameters[1].value.double_array_value:
+            self._node.get_logger().error("[GA] Params were set incorrectly")
+            raise RuntimeError("look at me!")
+            return False
+
+        return True
 
     def _restart_namespace(self, ns_index_0_based: int, grace_sec: float = 0.8) -> None:
         ns_num = ns_index_0_based + 1
@@ -333,8 +383,9 @@ class RosEvalPool:
             ok_eval = eval_client.wait_for_service(timeout_sec=0.5)
             ok_param = param_client.wait_for_service(timeout_sec=0.5)
             if ok_eval and ok_param:
-                break
+                return
             time.sleep(0.1)
+        raise RuntimeError("Restarted ns and services didn't come up")
 
     def _eval_once(self, client: rclpy.client.Client, req: RunEval.Request) -> Tuple[float, bool, bool]:
         """:return (objective, did_timeout, failtimeout_flag)"""
@@ -378,55 +429,70 @@ class RosEvalPool:
           eval -> (kill namespace, wait, reapply params) -> retry
         for a configurable number of retries (ROS param: eval_max_retries).
         """
-        client, param_client, ns_index = self._next_clients()
-        ns_str = f"/ns{ns_index + 1}"
+        client, param_client, get_param_client, ns_index = self._next_clients()
+        with self._ns_locks[ns_index]:
+            ns_str = f"/ns{ns_index + 1}"
 
-        # Build request once
-        req = RunEval.Request()
-        req.reset_tree = self._reset_tree
-        req.reset_level = self._reset_level
-        # timeout 10% higher than slowest seen so far
-        req.timeout_sec = self._default_timeout_sec if self.slowest_successful_wall_time is None else self.slowest_successful_wall_time.total_seconds() * 1.1
-        req.to_add = individual.yaml_path
-        req.file_args = self._file_args
+            # First regenerate the tree
+            individual.generate_tree()
+            # Build request once
+            req = RunEval.Request()
+            req.reset_tree = self._reset_tree
+            req.reset_level = self._reset_level
+            # timeout 10% higher than slowest seen so far
+            req.timeout_sec = self._default_timeout_sec
+            req.to_add = individual.yaml_path
+            req.file_args = self._file_args
 
-        total_attempts = self._eval_max_retries + 1  # initial attempt + retry count
+            total_attempts = self._eval_max_retries + 1  # initial attempt + retry count
 
-        for attempt in range(total_attempts):
-            # Apply FixedPotential parameters before all attempts
-            self._call_fixed_potential_service(param_client, individual)
+            for attempt in range(total_attempts):
+                # Apply FixedPotential parameters before all attempts
+                # self._node.get_logger().fatal(
+                #     f"[GA] sending PARAM request to 0-indexed rr {ns_index}, _clients: {len(self._clients)}, _param_clients: {len(self._param_clients)}")
+                did_param = self._call_fixed_potential_service(param_client, get_param_client, individual)
 
-            # For attempt 0, no restart; for subsequent attempts, restart first
-            if attempt != 0:
+                if did_param:
+                    # Ensure service is available
+                    if not client.service_is_ready():
+                        ok = client.wait_for_service(timeout_sec=self._service_wait_timeout)
+                        if not ok:
+                            self._node.get_logger().warn(
+                                f"[GA] {ns_str} service not available; attempt {attempt + 1}/{total_attempts} penalized.")
+                            continue  # proceed to next attempt (or exit if out of retries)
+
+                    # Perform the evaluation attempt
+                    # self._node.get_logger().fatal(
+                    #     f"[GA] sending EVAL request to 0-indexed rr {ns_index}, _clients: {len(self._clients)}, _param_clients: {len(self._param_clients)}")
+                    objective, did_timeout, failtimeout_flag = self._eval_once(client, req)
+                    if not did_timeout and not failtimeout_flag:
+                        # Success
+                        self._node.get_logger().info(
+                            f"[GA] Eval in {ns_str} success; attempt {attempt + 1}/{total_attempts}."
+                        )
+                        individual.delete_yaml()
+                        return (objective,)
+
+                # Log and continue
+                if not did_param:
+                    reason = "set param failed"
+                elif did_timeout:
+                    reason = "async timeout/hang"
+                else:
+                    reason = "server reported FAILTIMEOUT"
+                self._node.get_logger().warn(
+                    f"[GA] Eval in {ns_str} failed ({reason}); attempt {attempt + 1}/{total_attempts}; timeout {req.timeout_sec}."
+                )
                 # Serialize restarts per namespace to avoid races
                 with self._ns_restart_locks[ns_index]:
-                    self._node.get_logger().warn(f"[GA] Restarting {ns_str} before retry {attempt}/{total_attempts}…")
-                    self._restart_namespace(ns_index)
-                    self._call_fixed_potential_service(param_client, individual)
-
-            # Ensure service is available
-            if not client.service_is_ready():
-                ok = client.wait_for_service(timeout_sec=self._service_wait_timeout)
-                if not ok:
                     self._node.get_logger().warn(
-                        f"[GA] {ns_str} service not available; attempt {attempt + 1}/{total_attempts} penalized.")
-                    continue  # proceed to next attempt (or exit if out of retries)
+                        f"[GA] Restarting {ns_str} before retry {attempt + 1}/{total_attempts}…")
+                    self._restart_namespace(ns_index)
 
-            # Perform the evaluation attempt
-            objective, did_timeout, failtimeout_flag = self._eval_once(client, req)
-            if not did_timeout and not failtimeout_flag:
-                # Success
-                return (objective,)
-
-            # Log and continue
-            reason = "async timeout/hang" if did_timeout else "server reported FAILTIMEOUT"
-            self._node.get_logger().warn(
-                f"[GA] Eval in {ns_str} failed ({reason}); attempt {attempt + 1}/{total_attempts}."
-            )
-
-        # All attempts failed
-        self._node.get_logger().warn(f"[GA] All {total_attempts} attempts in {ns_str} failed; penalizing fitness.")
-        return (float('inf'),)
+            # All attempts failed
+            self._node.get_logger().warn(f"[GA] All {total_attempts} attempts in {ns_str} failed; penalizing fitness.")
+            individual.delete_yaml()
+            return (float('inf'),)
 
     def parallel_map(self, func: Callable, iterable: Iterable):
         """
