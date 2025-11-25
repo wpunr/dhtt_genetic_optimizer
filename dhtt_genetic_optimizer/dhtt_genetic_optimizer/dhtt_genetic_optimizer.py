@@ -36,6 +36,7 @@ import os
 import uuid
 import datetime
 import copy
+import pathlib
 
 import rclpy
 import rcl_interfaces.srv
@@ -85,6 +86,7 @@ class Individual:
                                                      []).to_parameter_msg()
         self.param_vals = rclpy.parameter.Parameter(PARAM_NODE_VALUES, rclpy.Parameter.Type.DOUBLE_ARRAY,
                                                     []).to_parameter_msg()
+        self.tree_data = None  # a dict
 
     # def __del__(self):
     #     self._delete_yaml()
@@ -320,6 +322,7 @@ class Individual:
         self.yaml_path = f"/tmp/{uuid.uuid4()}.yaml"
         with open(self.yaml_path, 'w') as f:
             yaml.dump(tree, f)
+        self.tree_data = tree
 
         # print(f"Generated new tree at: {self.yaml_path}")
 
@@ -332,9 +335,7 @@ def make_gene() -> Gene:
 
 
 def make_individual(original_tree_path: str, target_type: int) -> Individual:
-    # Parse YAML to count nodes of target_type
-    with open(original_tree_path, 'r') as f:
-        tree = yaml.safe_load(f)
+    tree = Individual.unroll_subtrees_file(original_tree_path)
 
     count = sum(1 for node_name in tree['NodeList'] if tree['Nodes'][node_name].get('type') == target_type)
 
@@ -369,7 +370,7 @@ class RosEvalPool:
         self._reset_level = self._declare_get_bool('reset_level', True)
         self._default_timeout_sec = self._declare_get_float('default_timeout_sec', 20)
         self._to_add = self._declare_get_str('to_add',
-                                             '/IdeaProjects/CS776-dHTT/ros2_ws/src/dhtt_base/cooking_test/dhtt_cooking/test/experiment_descriptions/recipe_pasta_with_tomato_sauce.yaml')  # absolute path to YAML tree
+                                             '/ros2_ws/src/dhtt_base/cooking_test/dhtt_cooking/test/experiment_descriptions/recipe_pasta_with_tomato_sauce.yaml')  # absolute path to YAML tree
         self._file_args = self._declare_get_str_arr('file_args', [])
         self._service_wait_timeout = self._declare_get_float('service_wait_timeout_sec', 5.0)
         self._eval_max_retries = self._declare_get_int('eval_max_retries', 2)
@@ -731,6 +732,44 @@ def mut_swap(individual) -> Tuple[Any,]:
 # ---------------------------
 # GA setup and run
 # ---------------------------
+class CallbackStatistics(tools.Statistics):
+    """Custom statistics tool that accepts a callback, we use this to log to file"""
+
+    def __init__(self, key=None, callback=None, interval=10):
+        super().__init__(key)
+        self.callback = callback
+        self.interval = interval
+        self.gens = 0
+
+    def compile(self, population):
+        record = super().compile(population)
+        gen = self.gens
+        self.gens += 1
+        if self.callback and gen % self.interval == 0:
+            self.callback(gen, population, record)
+        return record
+
+
+def log_to_file_factory(id, dir, popsize: int, gens: int, px: float, pm: float) -> Callable[[Any, Any, Any], None]:
+    def log_to_file(gen, population, record):
+        base_filename = f'ga-{id}-{popsize}-{gens}-{px}-{pm}'
+        base_path = f'{dir}/{base_filename}'
+
+        log_path = f'{base_path}/{base_filename}.log'
+        yaml_path = f'{base_path}/{gen}-{base_filename}.yaml'
+
+        pathlib.Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        pathlib.Path(yaml_path).parent.mkdir(parents=True, exist_ok=True)
+
+        with open(log_path, 'a') as f:
+            f.write(f'{gen},{record['min']},{record['avg']}\n')
+        best_individual: Individual = min(population, key=lambda obj: obj.fitness.values[0])
+
+        with open(yaml_path, 'w') as f:
+            yaml.dump(best_individual.tree_data, f)
+
+    return log_to_file
+
 
 def run_ga(node: Node):
     # ROS eval pool & evaluation function
@@ -746,6 +785,7 @@ def run_ga(node: Node):
     node.declare_parameter('mut_prob', 0.2)
     node.declare_parameter('tournament_size', 3)
     node.declare_parameter('uniform_indpb', 0.5)
+    node.declare_parameter('log_dir', '/ros2_ws/src/ga_runs/')
 
     POP_SIZE = int(node.get_parameter('population_size').value)
     NGEN = int(node.get_parameter('num_generations').value)
@@ -783,7 +823,10 @@ def run_ga(node: Node):
     toolbox.register("map", eval_pool.parallel_map)  # let DEAP parallelize evaluations
 
     # Stats & Hall of Fame
-    stats = tools.Statistics(lambda ind: ind.fitness.values[0])
+    log_to_file_cb = log_to_file_factory(id=datetime.datetime.now(), dir='/tmp', popsize=POP_SIZE, gens=NGEN, px=CX_PB,
+                                         pm=MUT_PB)
+    stats = CallbackStatistics(lambda ind: ind.fitness.values[0], callback=log_to_file_cb, interval=1)
+
     stats.register("avg", lambda xs: float(sum(xs) / len(xs)) if xs else float('nan'))
     stats.register("min", min)
     stats.register("max", max)
