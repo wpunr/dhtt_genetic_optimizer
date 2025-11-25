@@ -42,6 +42,7 @@ import rclpy
 import rcl_interfaces.srv
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
+import rclpy.callback_groups
 
 import dhtt_msgs.msg
 from dhtt_genetic_optimizer_msgs.srv import RunEval
@@ -369,6 +370,7 @@ class RosEvalPool:
         self._reset_tree = self._declare_get_bool('reset_tree', True)
         self._reset_level = self._declare_get_bool('reset_level', True)
         self._default_timeout_sec = self._declare_get_float('default_timeout_sec', 20)
+        self._heartbeat_sec = self._declare_get_float('heartbeat_sec', 5)
         self._to_add = self._declare_get_str('to_add',
                                              '/ros2_ws/src/dhtt_base/cooking_test/dhtt_cooking/test/experiment_descriptions/recipe_pasta_with_tomato_sauce.yaml')  # absolute path to YAML tree
         self._file_args = self._declare_get_str_arr('file_args', [])
@@ -376,25 +378,37 @@ class RosEvalPool:
         self._eval_max_retries = self._declare_get_int('eval_max_retries', 2)
 
         # Create clients for each namespace, e.g., /ns1/<service>, /ns2/<service>, ...
+        self.cb_group = rclpy.callback_groups.ReentrantCallbackGroup()
         self._clients: List[rclpy.client.Client] = []
         self._param_clients: List[rclpy.client.Client] = []
         self._get_param_clients: List[rclpy.client.Client] = []
+        self._last_heartbeats: List[datetime.datetime] = []
+        self._root_status_subs: List[rclpy.subscriber.Subscriber] = []
         for i in range(1, self._num_instances + 1):
             ns_prefix = f"/ns{i}"
             service_full = self._join_service(ns_prefix, self._eval_service_name)
-            client = self._node.create_client(RunEval, service_full)
+            client = self._node.create_client(RunEval, service_full, callback_group=self.cb_group)
             self._clients.append(client)
             self._node.get_logger().info(f"[GA] Created client for service: {service_full}")
 
             param_client_service_full = self._join_service(ns_prefix, self._param_client_service_name)
-            param_client = self._node.create_client(rcl_interfaces.srv.SetParameters, param_client_service_full)
+            param_client = self._node.create_client(rcl_interfaces.srv.SetParameters, param_client_service_full,
+                                                    callback_group=self.cb_group)
             self._param_clients.append(param_client)
             self._node.get_logger().info(f"[GA] Created client for service: {param_client_service_full}")
 
             get_param_client_service_full = self._join_service(ns_prefix, self._get_param_client_service_name)
-            get_param_client = self._node.create_client(rcl_interfaces.srv.GetParameters, get_param_client_service_full)
+            get_param_client = self._node.create_client(rcl_interfaces.srv.GetParameters, get_param_client_service_full,
+                                                        callback_group=self.cb_group)
             self._get_param_clients.append(get_param_client)
             self._node.get_logger().info(f"[GA] Created client for service: {get_param_client_service_full}")
+
+            status_topic_full = self._join_service(ns_prefix, 'root_status')
+            root_status_cb = lambda _: self._last_heartbeats.__setitem__(i - 1, datetime.datetime.now())
+            root_status_subscriber = self._node.create_subscription(dhtt_msgs.msg.NodeStatus, status_topic_full,
+                                                                    root_status_cb, 10, callback_group=self.cb_group)
+            self._last_heartbeats.append(datetime.datetime.now())
+            self._root_status_subs.append(root_status_subscriber)
 
         # Background spinner
         self._executor = MultiThreadedExecutor()
@@ -461,10 +475,16 @@ class RosEvalPool:
             self._rr_index += 1
             return client, param_client, get_param_client, index
 
-    def _tick_node(self, fut, end_time: int, tick_char='.', ticker_modulo: int = 100):
+    def _tick_node(self, fut, end_time: int, tick_char='.', ticker_modulo: int = 100, check_heartbeat=False,
+                   heartbeat_index: int | None = None):
         ticker = 0
         while not fut.done():
             if self._node.get_clock().now().nanoseconds >= end_time:
+                break
+            if (check_heartbeat and heartbeat_index is not None) and self._last_heartbeats[heartbeat_index] and (
+                    datetime.datetime.now() - self._last_heartbeats[
+                heartbeat_index]).total_seconds() > self._heartbeat_sec:
+                print("heartbeat check failed")
                 break
             time.sleep(0.01)
             if (ticker == 0):
@@ -575,25 +595,27 @@ class RosEvalPool:
             time.sleep(0.1)
         raise RuntimeError("Restarted ns and services didn't come up")
 
-    def _eval_once(self, client: rclpy.client.Client, req: RunEval.Request) -> Tuple[float, bool, bool]:
-        """:return (objective, did_timeout, failtimeout_flag)"""
+    def _eval_once(self, client: rclpy.client.Client, req: RunEval.Request, ns_index: int) -> Tuple[
+        float, bool, bool, bool]:
+        """:return (objective, did_timeout, failtimeout_flag, general_fail)"""
         start_wall_time = datetime.datetime.now()
         future = client.call_async(req)
         end_time = self._node.get_clock().now().nanoseconds + int(req.timeout_sec * 1e9 * 1.02)
-        self._tick_node(future, end_time=end_time, tick_char='e', ticker_modulo=10)
+        self._tick_node(future, end_time=end_time, tick_char='e', ticker_modulo=10, check_heartbeat=False,
+                        heartbeat_index=ns_index)  # leave heartbeat disabled for now
 
         if not future.done():
-            return (float('inf'), True, False)
+            return (float('inf'), True, False, True)
 
         try:
             resp = future.result()
         except Exception as e:
             self._node.get_logger().error(f"[GA] Service call exception: {e}")
-            return (float('inf'), False, False)
+            return (float('inf'), False, False, True)
 
         if resp is None:
             self._node.get_logger().warn("[GA] Service returned None; penalizing fitness.")
-            return (float('inf'), False, False)
+            return (float('inf'), False, False, True)
 
         failtimeout = (
                 not getattr(resp, "success", True)
@@ -601,14 +623,18 @@ class RosEvalPool:
         )
         if failtimeout:
             self._node.get_logger().warn("[GA] Server reported FAILTIMEOUT.")
-            return (float('inf'), False, True)
+            return (float('inf'), False, True, True)
+
+        if not resp.success or resp.ticks_elapsed <= 0:  # failed for some other reason
+            self._node.get_logger().warn(f"[GA] General fail, Server reported {resp.message}.")
+            return (float('inf'), False, False, True)
 
         wall_duration = datetime.datetime.now() - start_wall_time
         if self.slowest_successful_wall_time is None or wall_duration > self.slowest_successful_wall_time:
             self.slowest_successful_wall_time = wall_duration
 
         objective = float(resp.ticks_elapsed)
-        return (objective, False, False)
+        return (objective, False, False, False)
 
     def evaluate(self, individual: Individual) -> Tuple[float]:
         """
@@ -652,22 +678,32 @@ class RosEvalPool:
                     # Perform the evaluation attempt
                     # self._node.get_logger().fatal(
                     #     f"[GA] sending EVAL request to 0-indexed rr {ns_index}, _clients: {len(self._clients)}, _param_clients: {len(self._param_clients)}")
-                    objective, did_timeout, failtimeout_flag = self._eval_once(client, req)
-                    if not did_timeout and not failtimeout_flag:
+                    objective, did_timeout, failtimeout_flag, general_fail = self._eval_once(client, req, ns_index)
+                    if not any([did_timeout, failtimeout_flag, general_fail]):
                         # Success
                         self._node.get_logger().info(
                             f"[GA] Eval in {ns_str} success; attempt {attempt + 1}/{total_attempts}."
                         )
                         individual.delete_yaml()
-                        return (objective,)
+                        if objective <= 0:
+                            self._node.get_logger().info(f"[GA] Eval in {ns_str} returned 0 ticks.")
+                            # do not return, continue the loop
+                        else:
+                            return (objective,)
+                    # else keep going
 
                 # Log and continue
                 if not did_param:
                     reason = "set param failed"
                 elif did_timeout:
                     reason = "async timeout/hang"
-                else:
+                elif failtimeout_flag:
                     reason = "server reported FAILTIMEOUT"
+                elif general_fail:
+                    reason = "general fail"
+                else:
+                    reason = "unknown failure"
+
                 self._node.get_logger().warn(
                     f"[GA] Eval in {ns_str} failed ({reason}); attempt {attempt + 1}/{total_attempts}; timeout {req.timeout_sec}."
                 )
