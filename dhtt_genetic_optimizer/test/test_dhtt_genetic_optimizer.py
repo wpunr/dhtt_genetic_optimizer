@@ -229,9 +229,10 @@ class TestDeap:
         individual = dhtt_genetic_optimizer.dhtt_genetic_optimizer.make_individual(
             '/ros2_ws/src/dhtt_genetic_optimizer_base/dhtt_genetic_optimizer/test/test_descriptions/simple_and.yaml',
             dhtt_msgs.msg.Node.BEHAVIOR)
-        assert os.path.exists(individual.yaml_path)
+        assert not os.path.exists(individual.yaml_path)
         individual.genes[0].plugin = "fooasdf"
         individual.generate_tree()
+        assert os.path.exists(individual.yaml_path)
         with open(individual.yaml_path, 'r') as f:
             assert "fooasdf" in f.read()
 
@@ -245,3 +246,11 @@ class TestDeap:
                 if individual.genes[i].parameter is not None:
                     assert individual.param_names.value.string_array_value[count]
                     assert individual.param_vals.value.double_array_value[count]
+
+    def test_unroll_yaml(self):
+        individual = dhtt_genetic_optimizer.dhtt_genetic_optimizer.make_individual(
+            '/IdeaProjects/CS776-dHTT/ros2_ws/src/dhtt_base/cooking_test/dhtt_cooking/test/experiment_descriptions/recipe_pasta_with_tomato_sauce.yaml',
+            dhtt_msgs.msg.Node.BEHAVIOR)
+
+        foo = individual.unroll_subtrees_file(individual.original_tree_path)
+        individual.dump_yaml(foo, '/tmp/testdumpyaml.yaml')
