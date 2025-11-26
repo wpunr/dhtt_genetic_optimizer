@@ -44,6 +44,8 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 import rclpy.callback_groups
 
+import numpy as np
+
 import dhtt_msgs.msg
 from dhtt_genetic_optimizer_msgs.srv import RunEval
 
@@ -793,9 +795,11 @@ def log_to_file_factory(id, dir, popsize: int, gens: int, px: float, pm: float) 
 
         log_path = f'{base_path}/{base_filename}.log'
         yaml_path = f'{base_path}/{gen}-{base_filename}.yaml'
+        yaml_genes_path = f'{base_path}/{gen}-{base_filename}-genes.yaml'
 
         pathlib.Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         pathlib.Path(yaml_path).parent.mkdir(parents=True, exist_ok=True)
+        pathlib.Path(yaml_genes_path).parent.mkdir(parents=True, exist_ok=True)
 
         with open(log_path, 'a') as f:
             f.write(f'{gen},{record['min']},{record['avg']}\n')
@@ -803,6 +807,9 @@ def log_to_file_factory(id, dir, popsize: int, gens: int, px: float, pm: float) 
 
         with open(yaml_path, 'w') as f:
             yaml.dump(best_individual.tree_data, f)
+
+        with open(yaml_genes_path, 'w') as f:
+            yaml.dump(best_individual.genes, f)
 
     return log_to_file
 
@@ -821,7 +828,26 @@ def run_ga(node: Node):
     node.declare_parameter('mut_prob', 0.2)
     node.declare_parameter('tournament_size', 3)
     node.declare_parameter('uniform_indpb', 0.5)
+
     node.declare_parameter('log_dir', '/ros2_ws/src/ga_runs/')
+    _log_dir = node.get_parameter('log_dir').value
+
+    node.declare_parameter('log_id', '')
+    _log_id = node.get_parameter('log_id').value
+
+    node.declare_parameter('heuristics', 'all')  # all, fixed, distance, resource
+    _heuristics = node.get_parameter('heuristics').value
+    global PLUGINS
+    if _heuristics == 'all':
+        pass  # already set correctly
+    elif _heuristics == 'fixed':
+        PLUGINS = ['dhtt_genetic_optimizer::FixedPotential']
+    elif _heuristics == 'distance':
+        PLUGINS = ['dhtt_plugins::EfficiencyPotential']
+    elif _heuristics == 'resource':
+        PLUGINS = ['dhtt_plugins::ResourcePotential']
+    else:
+        raise RuntimeError(f'Param \'heuristics\' must be in: all, fixed, distance, resource; got {_heuristics}')
 
     POP_SIZE = int(node.get_parameter('population_size').value)
     NGEN = int(node.get_parameter('num_generations').value)
@@ -859,13 +885,23 @@ def run_ga(node: Node):
     toolbox.register("map", eval_pool.parallel_map)  # let DEAP parallelize evaluations
 
     # Stats & Hall of Fame
-    log_to_file_cb = log_to_file_factory(id=datetime.datetime.now(), dir='/tmp', popsize=POP_SIZE, gens=NGEN, px=CX_PB,
+    log_to_file_cb = log_to_file_factory(id=f'{_log_id}-{datetime.datetime.now()}', dir=_log_dir, popsize=POP_SIZE,
+                                         gens=NGEN, px=CX_PB,
                                          pm=MUT_PB)
     stats = CallbackStatistics(lambda ind: ind.fitness.values[0], callback=log_to_file_cb, interval=1)
 
-    stats.register("avg", lambda xs: float(sum(xs) / len(xs)) if xs else float('nan'))
+    def my_avg(fitnesses: list[float]):
+        if not fitnesses:
+            return float('nan')
+        filtered = [x for x in fitnesses if x < np.inf]
+        return float(sum(filtered) / len(filtered))
+
+    def my_max(fitnesses: list[float]):
+        return float(max([x for x in fitnesses if x < np.inf]))
+
+    stats.register("avg", my_avg)
     stats.register("min", min)
-    stats.register("max", max)
+    stats.register("max", my_max)
 
     hof = tools.HallOfFame(maxsize=1)
 
