@@ -1,29 +1,5 @@
 #!/usr/bin/python3
 
-"""Chatbot"""
-
-# !/usr/bin/env python3
-"""
-Genetic Algorithm (GA) boilerplate using DEAP + ROS 2 (Jazzy) service evaluation.
-
-- Selection: Tournament
-- Crossover: Uniform
-- Mutation: Swap (swap two genes' positions)
-- Representation: List of genes, each gene is a pair (str, float) — you will implement gene creation later.
-- Evaluation: Calls ROS 2 service `dhtt_genetic_optimizer_msgs/srv/RunEval` to obtain an objective
-             value to be MINIMIZED. This code uses `ticks_elapsed` as the objective.
-
-Parallelization:
-- Evaluations are dispatched in parallel (thread pool) using round-robin across multiple namespaces:
-  `/ns1/...`, `/ns2/...`, etc. The number of namespaces and the service name are ROS parameters.
-
-Important ROS 2 aspects:
-- A MultiThreadedExecutor spins in a background thread to process service responses.
-- Each evaluation is an async service call; we wait until the future is done.
-
-You already have your ROS 2 package set up; place this file in your node/package and run it.
-"""
-
 import time
 import math
 import random
@@ -954,17 +930,6 @@ def main():
     rclpy.init()
     node = Node('ga_optimizer')
 
-    # Optional parameter for the YAML tree path and default timeout, etc.
-    # You can set these with ROS parameters, e.g.:
-    #   ros2 run <your_pkg> ga_optimizer --ros-args -p to_add:=/abs/path/tree.yaml -p num_instances:=4 -p eval_service_name:=Eval_Server/run_eval
-    # node.declare_parameter('to_add',
-    #                        '/IdeaProjects/CS776-dHTT/ros2_ws/src/dhtt_base/cooking_test/dhtt_cooking/test/experiment_descriptions/recipe_pasta_with_tomato_sauce.yaml')
-    # node.declare_parameter('default_timeout_sec', 0.0)
-    # node.declare_parameter('reset_tree', True)
-    # node.declare_parameter('reset_level', True)
-    # node.declare_parameter('num_instances', 1)
-    # node.declare_parameter('eval_service_name', 'eval/run')
-    # node.declare_parameter('service_wait_timeout_sec', 5.0)
     node.declare_parameter('random_seed', 42)
 
     try:
