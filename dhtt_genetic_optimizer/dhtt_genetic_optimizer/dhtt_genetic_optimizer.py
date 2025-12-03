@@ -894,13 +894,24 @@ def run_ga(node: Node):
         if not fitnesses:
             return float('nan')
         filtered = [x for x in fitnesses if x < np.inf]
+        if len(filtered) == 0:
+            return float('nan')
         return float(sum(filtered) / len(filtered))
 
     def my_max(fitnesses: list[float]):
-        return float(max([x for x in fitnesses if x < np.inf]))
+        filtered = [x for x in fitnesses if x < np.inf]
+        if len(filtered) == 0:
+            return float('nan')
+        return float(max(filtered))
+
+    def my_min(fitnesses: list[float]):
+        filtered = [x for x in fitnesses if x < np.inf]
+        if len(filtered) == 0:
+            return float('nan')
+        return float(min(filtered))
 
     stats.register("avg", my_avg)
-    stats.register("min", min)
+    stats.register("min", my_min)
     stats.register("max", my_max)
 
     hof = tools.HallOfFame(maxsize=1)

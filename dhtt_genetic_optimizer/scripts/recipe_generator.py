@@ -9,12 +9,14 @@ def generate_yaml_combination(base_path, file_list, num_recipes, output_file="co
     # Randomly select files with repetition allowed
     selected_files = [random.choice(file_list) for _ in range(num_recipes)]
 
-    # Build yamlNodeList: root AND node + all selected nodes
-    yaml_node_list = ["IngredientAnd"] + [f"{os.path.splitext(f)[0]}_{i}" for i, f in enumerate(selected_files)]
+    # Build NodeList: root AND node + all selected nodes
+    yaml_node_list = ["GAExperimentAnd"] + [f"{os.path.splitext(f)[0]}_{i}" for i, f in enumerate(selected_files)]
+    for i in range(len(yaml_node_list)):
+        yaml_node_list[i] = yaml_node_list[i].replace('_', '-') # FixedPotential expects no underscores in the user-supplied name
 
     # Root AND node
     nodes = {
-        "IngredientAnd": {
+        "GAExperimentAnd": {
             "type": 1,
             "behavior_type": "dhtt_plugins::AndBehavior",
             "robot": 0,
@@ -23,20 +25,21 @@ def generate_yaml_combination(base_path, file_list, num_recipes, output_file="co
         }
     }
 
-    # Add selected files as subtrees under IngredientAnd
+    # Add selected files as subtrees under GAExperimentAnd
     for idx, file_name in enumerate(selected_files):
         node_name = f"{os.path.splitext(file_name)[0]}_{idx}"
+        node_name = node_name.replace('_', '-')
         nodes[node_name] = {
             "type": 5,
             "behavior_type": file_name,
             "robot": 0,
-            "parent": "IngredientAnd",
+            "parent": "GAExperimentAnd",
             # "params": [f"mark: {chr(65 + (idx % 26))}#"]  # A#, B#, C#... wraps after Z
         }
 
     # Final YAML structure
     yaml_data = {
-        "yamlNodeList": yaml_node_list,
+        "NodeList": yaml_node_list,
         "Nodes": nodes
     }
 
@@ -54,7 +57,7 @@ def generate_yaml_combination(base_path, file_list, num_recipes, output_file="co
 base_path = "/ros2_ws/src/dhtt_base/cooking_test/dhtt_cooking/test/experiment_descriptions"
 file_list = ["recipe_egg_toast.yaml", "recipe_pasta_with_tomato_sauce.yaml", "recipe_salad.yaml",
              "recipe_smoothie.yaml", "recipe_toast_with_tomato.yaml", ]
-num_recipes = 20  # Can be greater than len(file_list)
 
-generate_yaml_combination(base_path, file_list, num_recipes)
+for num_recipes in {2, 4, 8, 16, 20}:
+    generate_yaml_combination(base_path, file_list, num_recipes, output_file=f'combined-{num_recipes}.yaml')
 pass
