@@ -9,7 +9,7 @@ from rclpy.parameter import Parameter
 from rcl_interfaces.srv import SetParameters, GetParameters
 from dhtt_msgs.srv import ModifyRequest, FetchRequest, ControlRequest, HistoryRequest
 from dhtt_cooking_msgs.srv import CookingRequest
-from dhtt_msgs.msg import NodeStatus
+from dhtt_msgs.msg import NodeStatus, Node as Dhtt_Node
 from dhtt_genetic_optimizer.dhtt_genetic_optimizer import Gene
 
 
@@ -93,11 +93,15 @@ class ServerNode(Node):
         # Parse tree for NodeList
         with open(tree_file, 'r') as f:
             tree_data = yaml.safe_load(f)
-        node_list = tree_data.get('NodeList', []) # TODO need to check that the node has correct potential type
+        node_list = [node_name for node_name in tree_data['NodeList'] if
+                     tree_data['Nodes'][node_name]['type'] == Dhtt_Node.BEHAVIOR]
 
         # Parse genes for FixedPotential
         with open(genes_file, 'r') as f:
             raw_genes = yaml.unsafe_load(f)
+
+        if len(node_list) != len(raw_genes):
+            raise RuntimeError("Cannot match nodes to genes")
 
         fixed_names = []
         fixed_values = []
@@ -135,6 +139,7 @@ def main():
 
     yaml_path = sys.argv[1]
     genes_path = yaml_path.replace('.yaml', '-genes.yaml')
+    trace_out_path = yaml_path.replace('.yaml', '-trace.txt')
 
     rclpy.init()
     node = ServerNode()
@@ -170,8 +175,11 @@ def main():
     history = node.get_history()
     print("\n=== Execution History ===")
     if history:
-        for idx, entry in enumerate(history, start=1):
-            print(f"{idx:02d}. {entry}")
+        for entry in history:
+            print(f"{entry}")
+        with open(trace_out_path, 'w') as f:
+            content = '\n'.join(history)
+            f.write(content + '\n')
     else:
         print("(no history entries)")
 
