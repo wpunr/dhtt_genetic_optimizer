@@ -281,7 +281,7 @@ class Individual:
             node = tree['Nodes'][node_name]
             if node.get('type') == self.target_type and gene_index < len(self.genes):
                 if 'potential_type' in node and node['potential_type'] != self.genes[gene_index].plugin:
-                    raise RuntimeError(
+                    raise RuntimeWarning(
                         f'tried loading a node with a potential plugin that does not match the gene: {node['potential_type']} versus {self.genes[gene_index].plugin}')
                 node['potential_type'] = self.genes[gene_index].plugin
                 if self.genes[gene_index].plugin == 'dhtt_genetic_optimizer::FixedPotential':
@@ -294,7 +294,7 @@ class Individual:
                                                     fixed_plugin_vals).to_parameter_msg()
 
         if len(self.genes) != gene_index:  # len() is 1-indexed and gene_index should end up 1 higher
-            raise RuntimeError(
+            raise RuntimeWarning(
                 f'Number of genes does not match number of genes applied ({len(self.genes)} versus {gene_index - 1})')
 
         # Write new YAML to /tmp with unique name
@@ -537,7 +537,6 @@ class RosEvalPool:
         if get_param_names_result != req.parameters[0].value.string_array_value or get_param_vals_result != \
                 req.parameters[1].value.double_array_value:
             self._node.get_logger().error("[GA] Params were set incorrectly")
-            raise RuntimeError("look at me!")
             return False
 
         return True
@@ -579,7 +578,7 @@ class RosEvalPool:
             if ok_eval and ok_param:
                 return
             time.sleep(0.1)
-        raise RuntimeError("Restarted ns and services didn't come up")
+        raise RuntimeWarning("Restarted ns and services didn't come up")
 
     def _eval_once(self, client: rclpy.client.Client, req: RunEval.Request, ns_index: int) -> Tuple[
         float, bool, bool, bool]:
@@ -899,9 +898,16 @@ def run_ga(node: Node):
             return float('nan')
         return float(min(filtered))
 
+    def my_stdev(fitnesses: list[float]):
+        filtered = [x for x in fitnesses if x < np.inf]
+        if len(filtered) == 0:
+            return float('nan')
+        return float(np.std(filtered))
+
     stats.register("avg", my_avg)
     stats.register("min", my_min)
     stats.register("max", my_max)
+    stats.register("stdev", my_stdev)
 
     hof = tools.HallOfFame(maxsize=1)
 
