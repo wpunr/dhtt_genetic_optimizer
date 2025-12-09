@@ -24,6 +24,7 @@ import numpy as np
 
 import dhtt_msgs.msg
 from dhtt_genetic_optimizer_msgs.srv import RunEval
+import eval
 
 from deap import base, creator, tools, algorithms
 
@@ -381,12 +382,13 @@ class RosEvalPool:
             self._get_param_clients.append(get_param_client)
             self._node.get_logger().info(f"[GA] Created client for service: {get_param_client_service_full}")
 
-            status_topic_full = self._join_service(ns_prefix, 'root_status')
-            root_status_cb = lambda _: self._last_heartbeats.__setitem__(i - 1, datetime.datetime.now())
-            root_status_subscriber = self._node.create_subscription(dhtt_msgs.msg.NodeStatus, status_topic_full,
-                                                                    root_status_cb, 10, callback_group=self.cb_group)
-            self._last_heartbeats.append(datetime.datetime.now())
-            self._root_status_subs.append(root_status_subscriber)
+            # Disable heartbeat checking
+            # status_topic_full = self._join_service(ns_prefix, 'root_status')
+            # root_status_cb = lambda _: self._last_heartbeats.__setitem__(i - 1, datetime.datetime.now())
+            # root_status_subscriber = self._node.create_subscription(dhtt_msgs.msg.NodeStatus, status_topic_full,
+            #                                                         root_status_cb, 10, callback_group=self.cb_group)
+            # self._last_heartbeats.append(datetime.datetime.now())
+            # self._root_status_subs.append(root_status_subscriber)
 
         # Background spinner
         self._executor = MultiThreadedExecutor()
@@ -439,7 +441,7 @@ class RosEvalPool:
         self._node.get_logger().info("[GA] Spinner thread started.")
         while not self._stop_event.is_set():
             try:
-                self._executor.spin_once(timeout_sec=0.1)
+                self._executor.spin_once(timeout_sec=eval.SPIN_TIMEOUT_SEC_FAST)
             except Exception as e:
                 self._node.get_logger().error(f"[GA] Executor spin_once error: {e}")
 
@@ -464,7 +466,7 @@ class RosEvalPool:
                 heartbeat_index]).total_seconds() > self._heartbeat_sec:
                 print("heartbeat check failed")
                 break
-            time.sleep(0.01)
+            time.sleep(eval.SPIN_TIMEOUT_SEC_FAST)
             if (ticker == 0):
                 pass  # print(tick_char, end='', flush=True)
             ticker = (ticker + 1) % ticker_modulo

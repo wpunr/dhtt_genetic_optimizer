@@ -23,6 +23,9 @@ from dhtt_genetic_optimizer_msgs.srv import RunEval
 
 DEFAULT_WAIT_TIMEOUT = 300.0  # seconds, if request.timeout_sec <= 0
 
+SPIN_TIMEOUT_SEC_FAST = 0.1 # for repeated spin_once
+SPIN_TIMEOUT_SEC_SLOW = 10 # for critical spins like service requests
+
 
 class EvalNode(rclpy.node.Node):
     """
@@ -88,7 +91,7 @@ class EvalNode(rclpy.node.Node):
         req = ControlRequest.Request()
         req.type = control_type
         fut = self.controlsrv.call_async(req)
-        rclpy.spin_until_future_complete(self, fut)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=SPIN_TIMEOUT_SEC_SLOW)
         res = fut.result()
         if res is None:
             self.get_logger().error("Control service call failed (no response).")
@@ -112,7 +115,7 @@ class EvalNode(rclpy.node.Node):
         # your test: request.super_action = CookingRequest.Request.START
         req.super_action = CookingRequest.Request.START
         fut = self.cooking_client.call_async(req)
-        rclpy.spin_until_future_complete(self, fut)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=SPIN_TIMEOUT_SEC_SLOW)
         res = fut.result()
         return res is not None
 
@@ -125,7 +128,7 @@ class EvalNode(rclpy.node.Node):
         req.add_node.node_name = 'AllOrdersAnd'
         req.add_node.plugin_name = 'dhtt_plugins::AndBehavior'
         fut = self.modifysrv.call_async(req)
-        rclpy.spin_until_future_complete(self, fut)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=SPIN_TIMEOUT_SEC_SLOW)
 
         true_name = fut.result().added_nodes[0]
         return true_name
@@ -139,7 +142,7 @@ class EvalNode(rclpy.node.Node):
         req.add_node.node_name = 'AllOrdersThen'
         req.add_node.plugin_name = 'dhtt_plugins::ThenBehavior'
         fut = self.modifysrv.call_async(req)
-        rclpy.spin_until_future_complete(self, fut)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=SPIN_TIMEOUT_SEC_SLOW)
 
         true_name = fut.result().added_nodes[0]
         return true_name
@@ -160,7 +163,7 @@ class EvalNode(rclpy.node.Node):
         modify_rq.to_add = absolute_path
 
         modify_future = self.modifysrv.call_async(modify_rq)
-        rclpy.spin_until_future_complete(self, modify_future)
+        rclpy.spin_until_future_complete(self, modify_future, timeout_sec=SPIN_TIMEOUT_SEC_SLOW)
 
         modify_rs = modify_future.result()
 
@@ -177,19 +180,12 @@ class EvalNode(rclpy.node.Node):
             timeout_sec = DEFAULT_WAIT_TIMEOUT
 
         end_time = self.get_clock().now().nanoseconds + int(timeout_sec * 1e9)
-        # rate = self.create_rate(20.0)  # 20 Hz spin
-        try:
-            while rclpy.ok():
-                if self.root_state == target_state:
-                    return True
-                if self.get_clock().now().nanoseconds >= end_time:
-                    return False
-                rclpy.spin_once(self, timeout_sec=0.05)
-                # rate.sleep()
-        finally:
-            # destroy the transient rate resource to avoid warnings on shutdown
-            # self.destroy_rate(rate)
-            pass
+        while rclpy.ok():
+            if self.root_state == target_state:
+                return True
+            if self.get_clock().now().nanoseconds >= end_time:
+                return False
+            rclpy.spin_once(self, timeout_sec=SPIN_TIMEOUT_SEC_FAST)
         return False
 
     def _snapshot_ticks(self, must_wait: bool, wait_timeout_sec: float) -> Optional[int]:
@@ -206,7 +202,7 @@ class EvalNode(rclpy.node.Node):
         # Wait for first tick
         end_time = self.get_clock().now().nanoseconds + int(wait_timeout_sec * 1e9)
         while rclpy.ok() and self.get_clock().now().nanoseconds < end_time:
-            rclpy.spin_once(self, timeout_sec=0.05)
+            rclpy.spin_once(self, timeout_sec=SPIN_TIMEOUT_SEC_FAST)
             with self._ticks_lock:
                 if self._last_ticks is not None:
                     return self._last_ticks
