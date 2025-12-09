@@ -261,14 +261,6 @@ class Individual:
             raise ValueError("Main YAML must contain 'NodeList' and 'Nodes' keys.")
         return Individual.expand_all_subtrees(data, base_dir)
 
-    @staticmethod
-    def dump_yaml(data, path):
-        """
-        Dump the Python dict back to YAML, preserving insertion order.
-        """
-        with open(path, 'w') as f:
-            yaml.safe_dump(data, f, sort_keys=False)
-
     def delete_yaml(self):
         # Delete old file if exists
         if self.yaml_path and os.path.exists(self.yaml_path):
@@ -288,6 +280,9 @@ class Individual:
         for node_name in tree['NodeList']:
             node = tree['Nodes'][node_name]
             if node.get('type') == self.target_type and gene_index < len(self.genes):
+                if 'potential_type' in node and node['potential_type'] != self.genes[gene_index].plugin:
+                    raise RuntimeError(
+                        f'tried loading a node with a potential plugin that does not match the gene: {node['potential_type']} versus {self.genes[gene_index].plugin}')
                 node['potential_type'] = self.genes[gene_index].plugin
                 if self.genes[gene_index].plugin == 'dhtt_genetic_optimizer::FixedPotential':
                     fixed_plugin_names.append(node_name)
@@ -297,6 +292,10 @@ class Individual:
                                                      fixed_plugin_names).to_parameter_msg()
         self.param_vals = rclpy.parameter.Parameter(PARAM_NODE_VALUES, rclpy.Parameter.Type.DOUBLE_ARRAY,
                                                     fixed_plugin_vals).to_parameter_msg()
+
+        if len(self.genes) != gene_index:  # len() is 1-indexed and gene_index should end up 1 higher
+            raise RuntimeError(
+                f'Number of genes does not match number of genes applied ({len(self.genes)} versus {gene_index - 1})')
 
         # Write new YAML to /tmp with unique name
         self.yaml_path = f"/tmp/{uuid.uuid4()}.yaml"
@@ -314,13 +313,20 @@ def make_gene() -> Gene:
     return Gene(plugin, param)
 
 
-def make_individual(original_tree_path: str, target_type: int) -> Individual:
+def make_individual(original_tree_path: str, target_type: int, gene_lists: list[str]) -> Individual:
     tree = Individual.unroll_subtrees_file(original_tree_path)
 
     count = sum(1 for node_name in tree['NodeList'] if tree['Nodes'][node_name].get('type') == target_type)
 
     # Generate required genes
-    genes = [make_gene() for _ in range(count)]
+    genes = []
+    if gene_lists:
+        # Obviously, you want the order of items in gene_lists to match the order their subtree is given in the tree description
+        for gene_path in gene_lists:
+            with open(gene_path, 'r') as f:
+                genes += yaml.unsafe_load(f)
+    else:
+        genes = [make_gene() for _ in range(count)]
 
     return Individual(genes, original_tree_path, target_type)
 
@@ -827,6 +833,11 @@ def run_ga(node: Node):
     else:
         raise RuntimeError(f'Param \'heuristics\' must be in: all, fixed, distance, resource; got {_heuristics}')
 
+    node.declare_parameter('gene_lists', [''])  # list of str paths to -gene.yaml files
+    _gene_lists = node.get_parameter('gene_lists').value
+    if _gene_lists == ['']: _gene_lists = []  # rclpy can't type inference [] as a list[str]
+    if _gene_lists: print(f'Running with custom genes: {_gene_lists}')
+
     POP_SIZE = int(node.get_parameter('population_size').value)
     NGEN = int(node.get_parameter('num_generations').value)
     CX_PB = float(node.get_parameter('cx_prob').value)
@@ -838,9 +849,9 @@ def run_ga(node: Node):
     creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
     creator.create("Individual", Individual, fitness=creator.FitnessMin)
 
-    def build_individual_factory(original_tree_path: str, target_type: int):
+    def build_individual_factory(original_tree_path: str, target_type: int, gene_lists: list[str]):
         def _factory():
-            individual = make_individual(original_tree_path, target_type)
+            individual = make_individual(original_tree_path, target_type, gene_lists)
             return creator.Individual(individual.genes, individual.original_tree_path, individual.target_type)
 
         return _factory
@@ -848,7 +859,7 @@ def run_ga(node: Node):
     toolbox = base.Toolbox()
 
     # Attribute (gene) and individual/population initializers
-    toolbox.register("individual", build_individual_factory(eval_pool.to_add, dhtt_msgs.msg.Node.BEHAVIOR))
+    toolbox.register("individual", build_individual_factory(eval_pool.to_add, dhtt_msgs.msg.Node.BEHAVIOR, _gene_lists))
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
     # Genetic operators

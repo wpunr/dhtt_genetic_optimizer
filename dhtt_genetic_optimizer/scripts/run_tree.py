@@ -112,6 +112,8 @@ class ServerNode(Node):
                 if idx < len(node_list):
                     fixed_names.append(node_list[idx])
                     fixed_values.append(param)
+                else:
+                    raise RuntimeWarning("More genes supplied than nodes, ignoring")
 
         if not fixed_names:
             self.get_logger().info("No FixedPotential genes found.")
