@@ -281,7 +281,7 @@ class Individual:
             node = tree['Nodes'][node_name]
             if node.get('type') == self.target_type and gene_index < len(self.genes):
                 if 'potential_type' in node and node['potential_type'] != self.genes[gene_index].plugin:
-                    raise RuntimeWarning(
+                    print(
                         f'tried loading a node with a potential plugin that does not match the gene: {node['potential_type']} versus {self.genes[gene_index].plugin}')
                 node['potential_type'] = self.genes[gene_index].plugin
                 if self.genes[gene_index].plugin == 'dhtt_genetic_optimizer::FixedPotential':
@@ -294,7 +294,7 @@ class Individual:
                                                     fixed_plugin_vals).to_parameter_msg()
 
         if len(self.genes) != gene_index:  # len() is 1-indexed and gene_index should end up 1 higher
-            raise RuntimeWarning(
+            print(
                 f'Number of genes does not match number of genes applied ({len(self.genes)} versus {gene_index - 1})')
 
         # Write new YAML to /tmp with unique name
@@ -578,7 +578,7 @@ class RosEvalPool:
             if ok_eval and ok_param:
                 return
             time.sleep(0.1)
-        raise RuntimeWarning("Restarted ns and services didn't come up")
+        print("Restarted ns and services didn't come up")
 
     def _eval_once(self, client: rclpy.client.Client, req: RunEval.Request, ns_index: int) -> Tuple[
         float, bool, bool, bool]:
@@ -785,7 +785,7 @@ def log_to_file_factory(id, dir, popsize: int, gens: int, px: float, pm: float) 
         pathlib.Path(yaml_genes_path).parent.mkdir(parents=True, exist_ok=True)
 
         with open(log_path, 'a') as f:
-            f.write(f'{gen},{record['min']},{record['avg']}\n')
+            f.write(f'{gen},{record['min']},{record['avg']},{record['max']},{record['stdev']}\n')
         best_individual: Individual = min(population, key=lambda obj: obj.fitness.values[0])
 
         with open(yaml_path, 'w') as f:
